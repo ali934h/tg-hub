@@ -1,0 +1,30 @@
+{
+  "_comment": "Site scraping strategies. Add useProxy: true for sites that block datacenter IPs.",
+  "elitebabes.com": {
+    "name": "EliteBabes",
+    "useProxy": false,
+    "images": {
+      "selector": "a[href$='.jpg']",
+      "attr": "href",
+      "filterPatterns": []
+    }
+  },
+  "definebabe.com": {
+    "name": "DefineBabe",
+    "useProxy": false,
+    "images": {
+      "selector": "a[href$='.jpg']",
+      "attr": "href",
+      "filterPatterns": []
+    }
+  },
+  "pornpics.com": {
+    "name": "Pornpics",
+    "useProxy": true,
+    "images": {
+      "selector": "a[href$='.jpg']",
+      "attr": "href",
+      "filterPatterns": ["thumb", "_w400", "_w600", "masonry", "logo"]
+    }
+  }
+}
