@@ -8,8 +8,8 @@ function get(userId) {
       pendingFormats: null,
       waitingForCookies: false,
       activeJob: false,
-      // Google Drive upload flow
-      pendingDriveUpload: null, // { filePath, fileName, mimeType, labelLine, chatId, messageId }
+      // Post-download action flow: Drive / Direct Link / Both / None
+      pendingPostAction: null, // { filePath, jobDir, fileName, mimeType, labelLine, chatId, messageId }
       menuMessageId: null,
       menuView: null,
       menuPage: 0,
