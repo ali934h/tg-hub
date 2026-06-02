@@ -11,12 +11,20 @@ function get(userId) {
       activeJob: false,
 
       // ── filehost flow ────────────────────────────────────────────────────
-      // true = user sent /filehost and bot is waiting for a URL or file
       waitingForFilehostInput: false,
       filehostActiveJob: false,
 
-      // Post-download action flow: Drive / Direct Link / Both / None
-      // Shared between video and filehost flows.
+      // ── gallery flow ─────────────────────────────────────────────────────
+      // true = user sent /gallery and bot is waiting for one or more URLs
+      waitingForGalleryUrls: false,
+      // { urls: string[], archiveName: string } — confirmed job ready to run
+      galleryPendingJob: null,
+      // STATE: null | "pending" | "renaming" | "processing"
+      galleryState: null,
+      // AbortController for the running gallery job
+      galleryAbortController: null,
+
+      // ── shared post-download action ───────────────────────────────────────
       pendingPostAction: null, // { filePath, jobDir, fileName, mimeType, labelLine, chatId, messageId }
 
       // ── format menu state (video flow) ───────────────────────────────────
@@ -24,7 +32,7 @@ function get(userId) {
       menuView: null,
       menuPage: 0,
 
-      // ── cookies flow ────────────────────────────────────────────────────
+      // ── cookies flow ─────────────────────────────────────────────────────
       waitingForCookies: false,
     };
     userStates.set(userId, s);
