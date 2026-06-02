@@ -189,12 +189,25 @@ prompt_port() {
   done
 }
 
+prompt_yn() {
+  local prompt="$1"
+  while true; do
+    read -r -p "$(echo -e "${prompt} [y/N]: ")" yn
+    case "${yn,,}" in
+      y|yes) return 0 ;;
+      n|no|"") return 1 ;;
+      *) warn "Please answer y or n." ;;
+    esac
+  done
+}
+
 # ── input collection variables ─────────────────────────────────────────────────
 
 BOT_TOKEN="" API_ID="" API_HASH="" ALLOWED_USERS=""
 GOOGLE_CLIENT_ID="" GOOGLE_CLIENT_SECRET="" DRIVE_FOLDER_ID=""
 FILEHOST_DOMAIN="" FILEHOST_SERVE_DIR="" FILEHOST_PORT="3000"
 FILEHOST_RETENTION_DAYS="0" SSL_CERT="" SSL_KEY="" SSL_DIR=""
+GALLERY_PROXY_URL=""
 
 collect_inputs() {
   step "Collecting configuration"
@@ -245,6 +258,32 @@ collect_inputs() {
 
   echo -e "\n${BOLD}Retention${NC} — how many days to keep hosted files (0 = keep forever)"
   FILEHOST_RETENTION_DAYS=$(prompt_numeric "FILEHOST_RETENTION_DAYS" "0")
+
+  # ── SOCKS5 proxy for gallery (optional) ──────────────────────────────────
+  step "Gallery SOCKS5 proxy (optional)"
+  echo -e "${CYAN}The /gallery command can route image scraping and downloads through a SOCKS5 proxy.${NC}"
+  echo -e "${CYAN}This is useful for gallery sites that block datacenter IPs.${NC}"
+  echo -e "${CYAN}Each site strategy in siteStrategies.json can opt-in with \"useProxy\": true.${NC}"
+  echo
+  if prompt_yn "Configure a SOCKS5 proxy for the gallery feature?"; then
+    local proxy_host proxy_port proxy_user proxy_pass
+    read -r -p "$(echo -e "Proxy host [127.0.0.1]: ")" proxy_host
+    proxy_host="${proxy_host:-127.0.0.1}"
+    read -r -p "$(echo -e "Proxy port [1080]: ")" proxy_port
+    proxy_port="${proxy_port:-1080}"
+
+    if prompt_yn "Does the proxy require a username and password?"; then
+      read -r -p "$(echo -e "Proxy username: ")" proxy_user
+      read -r -s -p "$(echo -e "Proxy password: ")" proxy_pass
+      echo
+      GALLERY_PROXY_URL="socks5://${proxy_user}:${proxy_pass}@${proxy_host}:${proxy_port}"
+    else
+      GALLERY_PROXY_URL="socks5://${proxy_host}:${proxy_port}"
+    fi
+    ok "Gallery proxy configured: socks5://...@${proxy_host}:${proxy_port}"
+  else
+    info "Skipping gallery proxy. You can add GALLERY_PROXY_URL to .env later."
+  fi
 }
 
 confirm_summary() {
@@ -259,6 +298,7 @@ confirm_summary() {
   echo -e "  Serve dir:         ${FILEHOST_SERVE_DIR}"
   echo -e "  Internal port:     ${FILEHOST_PORT}"
   echo -e "  Retention:         ${FILEHOST_RETENTION_DAYS} day(s)$( [[ "${FILEHOST_RETENTION_DAYS}" == "0" ]] && echo " (keep forever)" || echo "" )"
+  echo -e "  Gallery proxy:     $( [[ -n "${GALLERY_PROXY_URL}" ]] && echo "enabled" || echo "disabled" )"
   echo
   while true; do
     read -r -p "$(echo -e "${BOLD}Proceed? [y/N]: ${NC}")" yn
@@ -291,6 +331,11 @@ FILEHOST_DOMAIN=${FILEHOST_DOMAIN}
 FILEHOST_SERVE_DIR=${FILEHOST_SERVE_DIR}
 FILEHOST_PORT=${FILEHOST_PORT}
 FILEHOST_RETENTION_DAYS=${FILEHOST_RETENTION_DAYS}
+
+# Gallery
+# SOCKS5 proxy for strategies with useProxy=true in siteStrategies.json
+# Format: socks5://[user:pass@]host:port
+GALLERY_PROXY_URL=${GALLERY_PROXY_URL}
 EOF
   chmod 600 "${INSTALL_DIR}/.env"
   ok ".env written (chmod 600)"
@@ -392,6 +437,9 @@ success_message() {
   else
     echo -e "     Files are kept forever (FILEHOST_RETENTION_DAYS=0)."
   fi
+  if [[ -n "${GALLERY_PROXY_URL}" ]]; then
+    echo -e "  🧅 Gallery SOCKS5 proxy: ${GREEN}enabled${NC}"
+  fi
   cat <<EOF
 
 ${BOLD}Useful commands:${NC}
@@ -399,6 +447,10 @@ ${BOLD}Useful commands:${NC}
   pm2 restart ${PROJECT}            # restart
   bash ${INSTALL_DIR}/update.sh     # pull latest code and restart
   bash ${INSTALL_DIR}/uninstall.sh  # remove everything
+
+${BOLD}To add a gallery site strategy:${NC}
+  nano ${INSTALL_DIR}/src/gallery/config/siteStrategies.json
+  pm2 restart ${PROJECT}
 EOF
 }
 
