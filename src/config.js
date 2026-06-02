@@ -37,10 +37,21 @@ const downloadDir = process.env.DOWNLOAD_DIR || "/root/tg-hub-downloads";
 fs.mkdirSync(downloadDir, { recursive: true });
 fs.mkdirSync(path.join(downloadDir, "cookies"), { recursive: true });
 
+// ── Google Drive ──────────────────────────────────────────────────────────────
 const googleClientId = optionalEnv("GOOGLE_CLIENT_ID");
 const googleClientSecret = optionalEnv("GOOGLE_CLIENT_SECRET");
 const googleRefreshToken = optionalEnv("GOOGLE_REFRESH_TOKEN");
 const driveEnabled = !!(googleClientId && googleClientSecret && googleRefreshToken);
+
+// ── Filehost (direct-link via nginx) ─────────────────────────────────────────
+const filehostDomain = optionalEnv("FILEHOST_DOMAIN");
+const filehostServeDir = optionalEnv("FILEHOST_SERVE_DIR") || path.join(downloadDir, "serve");
+const filehostRetentionDays = Number(process.env.FILEHOST_RETENTION_DAYS || 0);
+const filehostEnabled = !!filehostDomain;
+
+if (filehostEnabled) {
+  fs.mkdirSync(filehostServeDir, { recursive: true });
+}
 
 const config = {
   botToken: requireEnv("BOT_TOKEN"),
@@ -52,12 +63,23 @@ const config = {
   maxUploadBytes: Number(process.env.MAX_UPLOAD_MB || 2000) * 1024 * 1024,
   logLevel: (process.env.LOG_LEVEL || "info").toLowerCase(),
   sessionFile: path.join(__dirname, "..", "bot.session"),
+
   drive: {
     enabled: driveEnabled,
     clientId: googleClientId,
     clientSecret: googleClientSecret,
     refreshToken: googleRefreshToken,
     folderId: optionalEnv("DRIVE_FOLDER_ID"),
+  },
+
+  filehost: {
+    enabled: filehostEnabled,
+    domain: filehostDomain || "",
+    // Where nginx serves files from (alias in nginx conf)
+    serveDir: filehostServeDir,
+    // Internal Node port for /health endpoint (used by nginx upstream check)
+    port: Number(process.env.FILEHOST_PORT || 3000),
+    retentionDays: filehostRetentionDays,
   },
 };
 
