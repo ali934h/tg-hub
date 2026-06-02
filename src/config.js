@@ -19,17 +19,13 @@ function optionalEnv(name) {
 function parseAllowedUsers(raw) {
   if (!raw) return new Set();
   return new Set(
-    raw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((s) => {
-        const n = Number(s);
-        if (!Number.isFinite(n) || !Number.isInteger(n)) {
-          throw new Error(`Invalid user id in ALLOWED_USERS: ${s}`);
-        }
-        return n;
-      }),
+    raw.split(",").map((s) => s.trim()).filter(Boolean).map((s) => {
+      const n = Number(s);
+      if (!Number.isFinite(n) || !Number.isInteger(n)) {
+        throw new Error(`Invalid user id in ALLOWED_USERS: ${s}`);
+      }
+      return n;
+    }),
   );
 }
 
@@ -53,6 +49,10 @@ if (filehostEnabled) {
   fs.mkdirSync(filehostServeDir, { recursive: true });
 }
 
+// ── Gallery ───────────────────────────────────────────────────────────────────
+const galleryTempDir = process.env.GALLERY_TEMP_DIR || path.join(downloadDir, "gallery-temp");
+fs.mkdirSync(galleryTempDir, { recursive: true });
+
 const config = {
   botToken: requireEnv("BOT_TOKEN"),
   apiId: Number(requireEnv("API_ID")),
@@ -75,11 +75,25 @@ const config = {
   filehost: {
     enabled: filehostEnabled,
     domain: filehostDomain || "",
-    // Where nginx serves files from (alias in nginx conf)
     serveDir: filehostServeDir,
-    // Internal Node port for /health endpoint (used by nginx upstream check)
     port: Number(process.env.FILEHOST_PORT || 3000),
     retentionDays: filehostRetentionDays,
+  },
+
+  gallery: {
+    // Temp dir for per-job image staging (cleaned up after each job)
+    tempDir: galleryTempDir,
+    // Scraping
+    scrapeTimeoutMs: Number(process.env.GALLERY_SCRAPE_TIMEOUT_MS || 30000),
+    scrapeRetries: Number(process.env.GALLERY_SCRAPE_RETRIES || 3),
+    fallbackStrategyLimit: Number(process.env.GALLERY_FALLBACK_STRATEGY_LIMIT || 5),
+    fallbackMinImages: Number(process.env.GALLERY_FALLBACK_MIN_IMAGES || 5),
+    // Downloading
+    downloadConcurrency: Number(process.env.GALLERY_DOWNLOAD_CONCURRENCY || 5),
+    downloadTimeoutMs: Number(process.env.GALLERY_DOWNLOAD_TIMEOUT_MS || 60000),
+    downloadRetries: Number(process.env.GALLERY_DOWNLOAD_RETRIES || 3),
+    // Optional SOCKS5 proxy for strategies with useProxy=true
+    proxyUrl: process.env.GALLERY_PROXY_URL || "",
   },
 };
 
