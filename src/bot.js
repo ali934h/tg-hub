@@ -21,6 +21,16 @@ const {
 
 const URL_REGEX = /(https?:\/\/[^\s]+)/i;
 
+// All commands — used to detect "user typed a command while in a flow"
+const ALL_COMMANDS = [
+  "/start", "/help", "/video", "/cancel",
+  "/setvideocookies", "/clearvideocookies",
+];
+
+function isCommand(text) {
+  return ALL_COMMANDS.some((cmd) => text.startsWith(cmd));
+}
+
 function buildButtons(rows) {
   return rows.map((row) =>
     row.map((b) => Button.inline(b.label, Buffer.from(b.data))),
@@ -30,8 +40,7 @@ function buildButtons(rows) {
 function humanSize(bytes) {
   if (!bytes && bytes !== 0) return "?";
   const u = ["B", "KB", "MB", "GB"];
-  let i = 0;
-  let v = bytes;
+  let i = 0; let v = bytes;
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
   return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
 }
@@ -80,15 +89,6 @@ function cleanupDir(dir) {
   }
 }
 
-/**
- * Build the post-download action keyboard.
- *
- * Combinations:
- *   drive + filehost  → 4 buttons: Drive | Direct Link | Both | None
- *   drive only        → 2 buttons: ☁️ Yes | ❌ No
- *   filehost only     → 2 buttons: 🔗 Yes | ❌ No
- *   neither           → no keyboard (inline result only)
- */
 function buildPostDownloadButtons() {
   const d = config.drive.enabled;
   const f = config.filehost.enabled;
@@ -104,18 +104,8 @@ function buildPostDownloadButtons() {
       ],
     ];
   }
-  if (d) {
-    return [[
-      Button.inline("☁️ Upload to Drive", Buffer.from("post:drive")),
-      Button.inline("❌ No thanks", Buffer.from("post:none")),
-    ]];
-  }
-  if (f) {
-    return [[
-      Button.inline("🔗 Get Direct Link", Buffer.from("post:link")),
-      Button.inline("❌ No thanks", Buffer.from("post:none")),
-    ]];
-  }
+  if (d) return [[Button.inline("☁️ Upload to Drive", Buffer.from("post:drive")), Button.inline("❌ No thanks", Buffer.from("post:none"))]];
+  if (f) return [[Button.inline("🔗 Get Direct Link", Buffer.from("post:link")), Button.inline("❌ No thanks", Buffer.from("post:none"))]];
   return null;
 }
 
@@ -150,11 +140,12 @@ class Bot {
 
   async registerBotCommands() {
     const commands = [
-      { command: "start", description: "Start the bot" },
-      { command: "help", description: "Show usage instructions" },
-      { command: "cancel", description: "Cancel the current operation" },
-      { command: "setcookies", description: "Set cookies for restricted content" },
-      { command: "clearcookies", description: "Clear saved cookies" },
+      { command: "start",              description: "Start the bot" },
+      { command: "help",               description: "Show usage instructions" },
+      { command: "video",              description: "Download a video or audio" },
+      { command: "setvideocookies",    description: "Set cookies for restricted video content" },
+      { command: "clearvideocookies",  description: "Clear saved video cookies" },
+      { command: "cancel",             description: "Cancel the current operation" },
     ].map((c) => new Api.BotCommand({ command: c.command, description: c.description }));
     await this.client.invoke(
       new Api.bots.SetBotCommands({
@@ -189,22 +180,51 @@ class Bot {
     const text = (msg.message || "").trim();
     const userState = state.get(senderId);
 
-    if (msg.document) { await this.handleDocument(msg, senderId); return; }
-
-    if (text.startsWith("/start") || text.startsWith("/help")) {
-      await this.sendHelp(msg); return;
+    // ── document upload (cookies file) ──────────────────────────────────────
+    if (msg.document) {
+      await this.handleDocument(msg, senderId);
+      return;
     }
 
+    // ── /start, /help ────────────────────────────────────────────────────────
+    if (text.startsWith("/start") || text.startsWith("/help")) {
+      state.reset(senderId);
+      await this.sendHelp(msg);
+      return;
+    }
+
+    // ── /cancel — resets everything ──────────────────────────────────────────
     if (text.startsWith("/cancel")) {
       state.reset(senderId);
-      await msg.reply({ message: "✅ State reset. Send a new link." }); return;
+      await msg.reply({ message: "✅ Cancelled. Send /video to start a new download." });
+      return;
     }
 
-    if (text.startsWith("/setcookies")) {
-      userState.waitingForCookies = true;
+    // ── /video — enter video download flow ───────────────────────────────────
+    if (text.startsWith("/video")) {
+      // If already in a flow, reset first (last command wins)
+      state.reset(senderId);
+      const fresh = state.get(senderId);
+      fresh.waitingForVideoUrl = true;
       await msg.reply({
         message:
-          "🍪 <b>Set Cookies</b>\n\n" +
+          "🎬 <b>Video Download</b>\n\n" +
+          "Send me the video URL (YouTube, Instagram, Twitter, etc.).\n\n" +
+          "Send /cancel to abort.",
+        parseMode: "html",
+      });
+      return;
+    }
+
+    // ── /setvideocookies ─────────────────────────────────────────────────────
+    if (text.startsWith("/setvideocookies")) {
+      // Resets any active flow, enters cookie waiting mode
+      state.reset(senderId);
+      const fresh = state.get(senderId);
+      fresh.waitingForCookies = true;
+      await msg.reply({
+        message:
+          "🍪 <b>Set Video Cookies</b>\n\n" +
           "To provide cookies, choose one of these methods:\n\n" +
           "<b>Method 1 — Paste as text:</b>\n" +
           "1. Install the <b>Get cookies.txt LOCALLY</b> extension in your browser.\n" +
@@ -219,27 +239,23 @@ class Bot {
       return;
     }
 
-    if (text.startsWith("/clearcookies")) {
+    // ── /clearvideocookies ───────────────────────────────────────────────────
+    if (text.startsWith("/clearvideocookies")) {
       cookies.deleteCookies(senderId);
+      // Reset cookie waiting state but preserve any active flow
       userState.waitingForCookies = false;
-      await msg.reply({ message: "🗑 Cookies cleared." }); return;
+      await msg.reply({ message: "🗑 Video cookies cleared." });
+      return;
     }
 
-    const urlMatch = text.match(URL_REGEX);
-    if (urlMatch) {
-      userState.waitingForCookies = false;
-      const url = urlMatch[1];
-      if (userState.activeJob) {
-        await msg.reply({ message: "⏳ Another download is in progress. Please wait." }); return;
-      }
-      await this.handleUrl(msg, senderId, url); return;
-    }
-
+    // ── waiting for cookies (paste or file) ──────────────────────────────────
     if (userState.waitingForCookies) {
       if (cookies.isValidCookiesText(text)) {
         cookies.saveCookies(senderId, text);
         userState.waitingForCookies = false;
-        await msg.reply({ message: "✅ Cookies saved. Now send the link again to retry the download." });
+        await msg.reply({
+          message: "✅ Cookies saved. Now send /video and paste the link to retry.",
+        });
       } else {
         await msg.reply({
           message:
@@ -252,20 +268,58 @@ class Bot {
       return;
     }
 
-    await msg.reply({ message: "Send me a video URL (YouTube, etc.) and I will offer download options.\nType /help for more info." });
+    // ── waiting for video URL ────────────────────────────────────────────────
+    if (userState.waitingForVideoUrl) {
+      const urlMatch = text.match(URL_REGEX);
+
+      if (urlMatch) {
+        if (userState.activeJob) {
+          await msg.reply({ message: "⏳ Another download is in progress. Please wait." });
+          return;
+        }
+        userState.waitingForVideoUrl = false;
+        await this.handleUrl(msg, senderId, urlMatch[1]);
+        return;
+      }
+
+      // Not a URL and not a command → remind
+      await msg.reply({
+        message: "⚠️ That doesn't look like a valid URL.\nSend the video link or /cancel to abort.",
+      });
+      return;
+    }
+
+    // ── URL sent without /video first ────────────────────────────────────────
+    if (URL_REGEX.test(text)) {
+      await this.sendHelp(msg);
+      return;
+    }
+
+    // ── anything else ────────────────────────────────────────────────────────
+    await this.sendHelp(msg);
   }
 
   async handleDocument(msg, senderId) {
+    const userState = state.get(senderId);
+    // Only accept cookie files when explicitly waiting for them
+    if (!userState.waitingForCookies) {
+      await msg.reply({
+        message: "Use /setvideocookies first, then send the cookies.txt file.",
+      });
+      return;
+    }
     try {
       const buf = await this.client.downloadMedia(msg, {});
       const text = buf ? buf.toString("utf8") : "";
       if (cookies.isValidCookiesText(text)) {
         cookies.saveCookies(senderId, text);
-        state.get(senderId).waitingForCookies = false;
-        await msg.reply({ message: "✅ Cookies saved from file. Now send the link again to retry." });
+        userState.waitingForCookies = false;
+        await msg.reply({ message: "✅ Cookies saved. Now send /video and paste the link to retry." });
       } else {
         await msg.reply({
-          message: "❌ The uploaded file does not look like a valid cookies.txt file.\nPlease use the <b>Get cookies.txt LOCALLY</b> extension to export it.",
+          message:
+            "❌ The uploaded file does not look like a valid cookies.txt file.\n" +
+            "Please use the <b>Get cookies.txt LOCALLY</b> extension to export it.",
           parseMode: "html",
         });
       }
@@ -277,17 +331,19 @@ class Bot {
 
   async sendHelp(msg) {
     const extras = [];
-    if (config.drive.enabled) extras.push("☁️ <b>Google Drive</b> — upload to Drive with a public link");
-    if (config.filehost.enabled) extras.push("🔗 <b>Direct Link</b> — get a permanent direct download URL");
-    const extrasNote = extras.length ? "\n\nAfter each download you can choose:\n" + extras.join("\n") : "";
+    if (config.drive.enabled) extras.push("☁️ <b>Google Drive</b> — upload with a public link");
+    if (config.filehost.enabled) extras.push("🔗 <b>Direct Link</b> — permanent direct download URL");
+    const extrasNote = extras.length
+      ? "\n\nAfter each download you can choose:\n" + extras.join("\n")
+      : "";
     const help =
-      "🎬 <b>tg-hub bot</b>\n\n" +
-      "Send a video URL (YouTube, etc.) and pick a quality.\n\n" +
+      "🎬 <b>tg-hub</b>\n\n" +
       "<b>Commands:</b>\n" +
-      "/start, /help — this message\n" +
-      "/cancel — reset state\n" +
-      "/setcookies — set cookies for age-restricted or login-required content\n" +
-      "/clearcookies — delete saved cookies" +
+      "/video — download a video or audio\n" +
+      "/setvideocookies — set cookies for age-restricted or login-required content\n" +
+      "/clearvideocookies — delete saved cookies\n" +
+      "/cancel — cancel the current operation\n" +
+      "/help — show this message" +
       extrasNote;
     await msg.reply({ message: help, parseMode: "html" });
   }
@@ -306,7 +362,9 @@ class Bot {
         userState.pendingUrl = url;
         await this.client.editMessage(msg.chatId, {
           message: status.id,
-          text: "🔒 This URL seems to require cookies (login/age/region).\n\nUse /setcookies to provide your cookies, then send the link again.",
+          text:
+            "🔒 This URL requires cookies (login / age restriction / region lock).\n\n" +
+            "Use /setvideocookies to provide your cookies, then /video again.",
           parseMode: "html",
         });
       } else {
@@ -347,14 +405,14 @@ class Bot {
     const data = event.data ? event.data.toString() : "";
     const userState = state.get(senderId);
 
-    // ── post-download action (drive / link / both / none) ─────────────────────
+    // ── post-download action ──────────────────────────────────────────────────
     if (data.startsWith("post:")) {
       if (!userState.pendingPostAction) {
         await event.answer({ message: "Session expired.", alert: true }); return;
       }
       const pending = userState.pendingPostAction;
       userState.pendingPostAction = null;
-      const action = data.slice(5); // "drive" | "link" | "both" | "none"
+      const action = data.slice(5);
       await event.answer({ message: action === "none" ? "OK" : "Processing..." });
       await this.handlePostAction(action, pending);
       return;
@@ -370,7 +428,7 @@ class Bot {
     }
 
     if (!userState.pendingUrl || !userState.pendingFormats) {
-      await event.answer({ message: "Session expired. Send the link again.", alert: true }); return;
+      await event.answer({ message: "Session expired. Send /video to start again.", alert: true }); return;
     }
 
     if (userState.activeJob) {
@@ -521,30 +579,18 @@ class Bot {
         },
       });
 
-      // ── Post-download menu ────────────────────────────────────────────────
       const buttons = buildPostDownloadButtons();
       const promptText = postDownloadPromptText(labelLine);
 
       if (buttons && promptText) {
         const userState = state.get(senderId);
-        userState.pendingPostAction = {
-          filePath: outputFile,
-          jobDir,
-          fileName,
-          mimeType: guessMime(outputFile),
-          labelLine,
-          chatId,
-          messageId,
-        };
+        userState.pendingPostAction = { filePath: outputFile, jobDir, fileName, mimeType: guessMime(outputFile), labelLine, chatId, messageId };
         await this.client.editMessage(chatId, { message: messageId, text: promptText, buttons });
-        // Do NOT clean up — handlePostAction will do it based on choice.
         return;
       }
 
-      // No post-download options configured — just mark done and clean up.
       await this.client.editMessage(chatId, { message: messageId, text: `${labelLine}\n✅ Done.` });
     } finally {
-      // Only clean up if no pending post-action (i.e. we returned early above).
       const userState = state.get(senderId);
       if (!userState.pendingPostAction) {
         cleanupDir(jobDir);
@@ -552,15 +598,6 @@ class Bot {
     }
   }
 
-  /**
-   * Execute the post-download action chosen by the user.
-   *
-   * Cleanup rules:
-   *   none  → delete immediately (file not needed)
-   *   drive → delete after upload succeeds (Drive has it)
-   *   link  → move to serveDir (nginx will serve), delete jobDir
-   *   both  → move to serveDir AND upload to Drive, then delete jobDir
-   */
   async handlePostAction(action, pending) {
     const { filePath, jobDir, fileName, mimeType, labelLine, chatId, messageId } = pending;
 
@@ -575,15 +612,11 @@ class Bot {
       return;
     }
 
-    // ── Drive ──────────────────────────────────────────────────────────────
     const doDrive = async () => {
       await edit(`${labelLine}\n☁️ Uploading to Google Drive... 0%`);
       let lastEdit = 0;
       const fileData = await drive.uploadFile({
-        filePath,
-        fileName,
-        mimeType,
-        parentId: config.drive.folderId,
+        filePath, fileName, mimeType, parentId: config.drive.folderId,
         onProgress: async (pct) => {
           const now = Date.now();
           if (now - lastEdit < 3000) return;
@@ -596,41 +629,26 @@ class Bot {
       return drive.buildLinks(fileData.id, fileData.mimeType);
     };
 
-    // ── Filehost ───────────────────────────────────────────────────────────
     const doLink = async () => {
       const result = await filehost.registerFile(filePath, fileName);
       logger.info(`Filehost registered: ${result.url}`);
       return result.url;
     };
 
-    // ── Execute ────────────────────────────────────────────────────────────
     try {
       if (action === "drive") {
         const links = await doDrive();
-        await edit(
-          `${labelLine}\n✅ Done.\n\n` +
-          `☁️ <b>Google Drive (public):</b>\n` +
-          `<a href="${links.view}">View</a> | <a href="${links.download}">Download</a>`,
-          "html",
-        );
+        await edit(`${labelLine}\n✅ Done.\n\n☁️ <b>Google Drive (public):</b>\n<a href="${links.view}">View</a> | <a href="${links.download}">Download</a>`, "html");
         cleanupDir(jobDir);
       } else if (action === "link") {
         await edit(`${labelLine}\n🔗 Registering direct link...`);
         const url = await doLink();
-        await edit(
-          `${labelLine}\n✅ Done.\n\n🔗 <b>Direct Link:</b>\n<code>${escapeHtml(url)}</code>`,
-          "html",
-        );
-        // jobDir is cleaned; the file now lives in serveDir (moved by registerFile)
+        await edit(`${labelLine}\n✅ Done.\n\n🔗 <b>Direct Link:</b>\n<code>${escapeHtml(url)}</code>`, "html");
         cleanupDir(jobDir);
       } else if (action === "both") {
         await edit(`${labelLine}\n⏳ Processing...`);
-        // Drive reads the file; link moves it. Do drive first, then link.
-        const driveLinksPromise = doDrive().catch((e) => { logger.error("Drive upload failed:", e.message); return null; });
-        // Wait for drive to finish reading the file before moving it.
-        const driveLinks = await driveLinksPromise;
+        const driveLinks = await doDrive().catch((e) => { logger.error("Drive upload failed:", e.message); return null; });
         const directUrl = await doLink();
-
         let resultText = `${labelLine}\n✅ Done.\n\n`;
         if (driveLinks) {
           resultText += `☁️ <b>Google Drive:</b> <a href="${driveLinks.view}">View</a> | <a href="${driveLinks.download}">Download</a>\n`;
@@ -643,13 +661,8 @@ class Bot {
       }
     } catch (err) {
       logger.error(`Post-action "${action}" failed:`, err.message);
-      const hint = drive.isInvalidGrant(err)
-        ? "\n\nRun <code>node setup-drive.js</code> to refresh the token."
-        : "";
-      await edit(
-        `${labelLine}\n✅ Sent to Telegram.\n\n❌ Post-action failed: <pre>${escapeHtml(truncate(err.message, 300))}</pre>${hint}`,
-        "html",
-      );
+      const hint = drive.isInvalidGrant(err) ? "\n\nRun <code>node setup-drive.js</code> to refresh the token." : "";
+      await edit(`${labelLine}\n✅ Sent to Telegram.\n\n❌ Post-action failed: <pre>${escapeHtml(truncate(err.message, 300))}</pre>${hint}`, "html");
       cleanupDir(jobDir);
     }
   }
@@ -661,7 +674,7 @@ class Bot {
       try {
         await this.client.editMessage(event.chatId, {
           message: Number(event.messageId),
-          text: "🔒 Cookies are required for this content.\n\nUse /setcookies to provide your cookies, then send the link again.",
+          text: "🔒 Cookies are required for this content.\n\nUse /setvideocookies to provide your cookies, then /video again.",
           parseMode: "html",
         });
       } catch (e) { /* ignore */ }
