@@ -27,10 +27,10 @@ const {
 const URL_REGEX = /(https?:\/\/[^\s]+)/i;
 const UPDATE_INTERVAL_MS = 5000;
 
+// ── helpers ───────────────────────────────────────────────────────────────────
+
 function buildButtons(rows) {
-  return rows.map((row) =>
-    row.map((b) => Button.inline(b.label, Buffer.from(b.data))),
-  );
+  return rows.map((row) => row.map((b) => Button.inline(b.label, Buffer.from(b.data))));
 }
 
 function humanSize(bytes) {
@@ -91,28 +91,51 @@ function hasTelegramFile(msg) {
     (msg.media && (msg.media.document || msg.media.photo)));
 }
 
+// ── Post-download 8-button keyboard ──────────────────────────────────────────
+//
+// Always shows all 8 options. Which options are actually available depends on
+// what features are configured; unavailable rows are omitted so the keyboard
+// adapts gracefully:
+//
+//   drive + filehost enabled  → 8 buttons (4 rows of 2)
+//   drive only                → 4 buttons (2 rows: tg+drive, drive+none)
+//   filehost only             → 4 buttons (2 rows: tg+link, link+none)
+//   neither                   → 2 buttons (1 row: tg | none)
+//
+// Action codes:   tg | drive | link | drive+link | drive+tg | link+tg | all | none
+//
 function buildPostDownloadButtons() {
   const d = config.drive.enabled;
   const f = config.filehost.enabled;
+
   if (d && f) {
     return [
-      [Button.inline("☁️ Google Drive", Buffer.from("post:drive")), Button.inline("🔗 Direct Link", Buffer.from("post:link"))],
-      [Button.inline("☁️🔗 Both", Buffer.from("post:both")), Button.inline("❌ None", Buffer.from("post:none"))],
+      [Button.inline("📱 Telegram", Buffer.from("post:tg")),          Button.inline("☁️ Google Drive", Buffer.from("post:drive"))],
+      [Button.inline("🔗 Direct Link", Buffer.from("post:link")),      Button.inline("☁️🔗 Drive + Link", Buffer.from("post:drive+link"))],
+      [Button.inline("☁️📱 Drive + TG", Buffer.from("post:drive+tg")), Button.inline("🔗📱 Link + TG", Buffer.from("post:link+tg"))],
+      [Button.inline("🌐 All Three", Buffer.from("post:all")),         Button.inline("❌ None", Buffer.from("post:none"))],
     ];
   }
-  if (d) return [[Button.inline("☁️ Upload to Drive", Buffer.from("post:drive")), Button.inline("❌ No thanks", Buffer.from("post:none"))]];
-  if (f) return [[Button.inline("🔗 Get Direct Link", Buffer.from("post:link")), Button.inline("❌ No thanks", Buffer.from("post:none"))]];
-  return null;
+  if (d) {
+    return [
+      [Button.inline("📱 Telegram", Buffer.from("post:tg")),           Button.inline("☁️ Google Drive", Buffer.from("post:drive"))],
+      [Button.inline("☁️📱 Drive + TG", Buffer.from("post:drive+tg")), Button.inline("❌ None", Buffer.from("post:none"))],
+    ];
+  }
+  if (f) {
+    return [
+      [Button.inline("📱 Telegram", Buffer.from("post:tg")),           Button.inline("🔗 Direct Link", Buffer.from("post:link"))],
+      [Button.inline("🔗📱 Link + TG", Buffer.from("post:link+tg")),   Button.inline("❌ None", Buffer.from("post:none"))],
+    ];
+  }
+  // Neither Drive nor filehost configured — only Telegram or nothing
+  return [
+    [Button.inline("📱 Send to Telegram", Buffer.from("post:tg")), Button.inline("❌ None", Buffer.from("post:none"))],
+  ];
 }
 
-function postDownloadPromptText(labelLine, sentToTelegram = true) {
-  const d = config.drive.enabled;
-  const f = config.filehost.enabled;
-  const base = sentToTelegram ? `${labelLine}\n✅ Sent to Telegram.\n\n` : `${labelLine}\n✅ Downloaded.\n\n`;
-  if (d && f) return `${base}What else would you like?`;
-  if (d) return `${base}☁️ Upload to Google Drive (public link)?`;
-  if (f) return `${base}🔗 Get a direct download link?`;
-  return null;
+function postDownloadPromptText(labelLine) {
+  return `${labelLine}\n✅ Downloaded.\n\nChoose what to do with it:`;
 }
 
 // ── Gallery confirm keyboard ──────────────────────────────────────────────────
@@ -137,6 +160,8 @@ function buildGallerySummary(urls, archiveName) {
   );
 }
 
+// ── Bot class ─────────────────────────────────────────────────────────────────
+
 class Bot {
   constructor(client) {
     this.client = client;
@@ -152,7 +177,6 @@ class Bot {
       new CallbackQuery({}),
     );
     logger.info("Event handlers registered");
-    // Load gallery strategies at startup
     galleryStrategyEngine.load().catch((err) => {
       logger.warn(`Failed to load gallery strategies: ${err.message}`);
     });
@@ -197,49 +221,40 @@ class Bot {
     const text = (msg.message || "").trim();
     const userState = state.get(senderId);
 
-    // ── /start, /help ─────────────────────────────────────────────────────────
     if (text.startsWith("/start") || text.startsWith("/help")) {
-      state.reset(senderId);
-      await this.sendHelp(msg); return;
+      state.reset(senderId); await this.sendHelp(msg); return;
     }
 
-    // ── /cancel ───────────────────────────────────────────────────────────────
     if (text.startsWith("/cancel")) {
       if (userState.galleryAbortController) userState.galleryAbortController.abort();
       state.reset(senderId);
       await msg.reply({ message: "✅ Cancelled." }); return;
     }
 
-    // ── /video ────────────────────────────────────────────────────────────────
     if (text.startsWith("/video")) {
       state.reset(senderId);
       state.get(senderId).waitingForVideoUrl = true;
       await msg.reply({ message: "🎬 <b>Video Download</b>\n\nSend me the video URL.\n\nSend /cancel to abort.", parseMode: "html" }); return;
     }
 
-    // ── /setvideocookies ──────────────────────────────────────────────────────
     if (text.startsWith("/setvideocookies")) {
       state.reset(senderId);
       state.get(senderId).waitingForCookies = true;
       await msg.reply({
         message:
           "🍪 <b>Set Video Cookies</b>\n\n" +
-          "<b>Method 1 — Paste as text:</b>\n" +
-          "Install <b>Get cookies.txt LOCALLY</b>, export for the site, paste ALL contents here.\n\n" +
-          "<b>Method 2 — Send as file:</b>\n" +
-          "Same but send the <code>cookies.txt</code> file directly.\n\nSend /cancel to abort.",
+          "<b>Method 1 — Paste as text:</b>\nInstall <b>Get cookies.txt LOCALLY</b>, export for the site, paste ALL contents here.\n\n" +
+          "<b>Method 2 — Send as file:</b>\nSame but send the <code>cookies.txt</code> file directly.\n\nSend /cancel to abort.",
         parseMode: "html",
       }); return;
     }
 
-    // ── /clearvideocookies ────────────────────────────────────────────────────
     if (text.startsWith("/clearvideocookies")) {
       cookies.deleteCookies(senderId);
       userState.waitingForCookies = false;
       await msg.reply({ message: "🗑 Video cookies cleared." }); return;
     }
 
-    // ── /filehost ─────────────────────────────────────────────────────────────
     if (text.startsWith("/filehost")) {
       state.reset(senderId);
       state.get(senderId).waitingForFilehostInput = true;
@@ -251,7 +266,6 @@ class Bot {
       }); return;
     }
 
-    // ── /gallery ──────────────────────────────────────────────────────────────
     if (text.startsWith("/gallery")) {
       state.reset(senderId);
       state.get(senderId).waitingForGalleryUrls = true;
@@ -323,7 +337,6 @@ class Bot {
 
     // ── waiting for gallery URLs ──────────────────────────────────────────────
     if (userState.waitingForGalleryUrls) {
-      // If in renaming state, treat this text as the new archive name
       if (userState.galleryState === "renaming") {
         if (!userState.galleryPendingJob) {
           state.reset(senderId); await msg.reply({ message: "Session expired. Send /gallery again." }); return;
@@ -340,12 +353,10 @@ class Bot {
         await msg.reply({ message: `✅ Archive name updated.\n\n${summary}`, parseMode: "html", buttons: galleryConfirmKeyboard() }); return;
       }
 
-      // If already processing, ignore
       if (userState.galleryState === "processing") {
         await msg.reply({ message: "⏳ Gallery download in progress. Use the Cancel button to stop it." }); return;
       }
 
-      // Parse URLs from the message
       const lines = text.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("http"));
       if (lines.length === 0) {
         await msg.reply({ message: "⚠️ No valid URLs found. Send gallery URLs (one per line) or /cancel to abort." }); return;
@@ -360,7 +371,6 @@ class Bot {
       await msg.reply({ message: summary, parseMode: "html", buttons: galleryConfirmKeyboard() }); return;
     }
 
-    // ── URL/file without a command ────────────────────────────────────────────
     if (URL_REGEX.test(text) || hasTelegramFile(msg)) {
       await this.sendHelp(msg); return;
     }
@@ -369,10 +379,11 @@ class Bot {
   }
 
   async sendHelp(msg) {
-    const extras = [];
-    if (config.drive.enabled) extras.push("☁️ <b>Google Drive</b> — upload with a public link");
-    if (config.filehost.enabled) extras.push("🔗 <b>Direct Link</b> — permanent direct download URL");
-    const extrasNote = extras.length ? "\n\nAfter each download you can choose:\n" + extras.join("\n") : "";
+    const opts = [];
+    if (config.drive.enabled) opts.push("☁️ Google Drive");
+    if (config.filehost.enabled) opts.push("🔗 Direct Link");
+    opts.push("📱 Telegram");
+    const optNote = `\n\nAfter each download you choose how to receive it:\n${opts.join(" | ")} | ❌ None`;
     const help =
       "🎬 <b>tg-hub</b>\n\n" +
       "<b>Commands:</b>\n" +
@@ -383,7 +394,7 @@ class Bot {
       "/clearvideocookies — delete saved video cookies\n" +
       "/cancel — cancel the current operation\n" +
       "/help — show this message" +
-      extrasNote;
+      optNote;
     await msg.reply({ message: help, parseMode: "html" });
   }
 
@@ -421,6 +432,7 @@ class Bot {
   }
 
   // ── /filehost flow — Telegram file ───────────────────────────────────────────
+  // Download from Telegram → show action buttons (no re-upload yet)
 
   async handleFilehostTelegram(msg, senderId) {
     const userState = state.get(senderId);
@@ -433,14 +445,22 @@ class Bot {
       try { await this.client.editMessage(msg.chatId, { message: status.id, text }); } catch (e) { /* ignore */ }
     };
     try {
-      const { tmpPath, fileName, size } = await filehost.downloadFromTelegram(this.client, msg, jobDir, (pct) => editStatus(`⬇️ Downloading from Telegram... ${pct.toFixed(1)}%`));
-      const buttons = buildPostDownloadButtons();
-      const promptText = postDownloadPromptText(`📦 <b>${escapeHtml(fileName)}</b>`, false);
-      if (buttons && promptText) {
-        userState.pendingPostAction = { filePath: tmpPath, jobDir, fileName, mimeType: guessMime(tmpPath), labelLine: `📦 ${fileName}`, chatId: msg.chatId, messageId: status.id };
-        await this.client.editMessage(msg.chatId, { message: status.id, text: promptText, parseMode: "html", buttons }); return;
-      }
-      await this.client.editMessage(msg.chatId, { message: status.id, text: `📦 ${fileName}\n✅ Downloaded (${humanSize(size)}).` });
+      const { tmpPath, fileName, size } = await filehost.downloadFromTelegram(
+        this.client, msg, jobDir,
+        (pct) => editStatus(`⬇️ Downloading from Telegram... ${pct.toFixed(1)}%`),
+      );
+      const labelLine = `📦 ${fileName} (${humanSize(size)})`;
+      userState.pendingPostAction = {
+        filePath: tmpPath, jobDir, fileName,
+        mimeType: guessMime(tmpPath), labelLine,
+        chatId: msg.chatId, messageId: status.id,
+      };
+      await this.client.editMessage(msg.chatId, {
+        message: status.id,
+        text: postDownloadPromptText(labelLine),
+        parseMode: "html",
+        buttons: buildPostDownloadButtons(),
+      });
     } catch (err) {
       try { await this.client.editMessage(msg.chatId, { message: status.id, text: `❌ Download failed:\n<pre>${escapeHtml(truncate(err.message, 400))}</pre>`, parseMode: "html" }); } catch (e) { /* ignore */ }
       cleanupDir(jobDir);
@@ -451,6 +471,7 @@ class Bot {
   }
 
   // ── /filehost flow — direct URL ───────────────────────────────────────────────
+  // Download from URL → show action buttons (no upload yet)
 
   async handleFilehostUrl(msg, senderId, url) {
     const userState = state.get(senderId);
@@ -463,26 +484,22 @@ class Bot {
       try { await this.client.editMessage(msg.chatId, { message: status.id, text }); } catch (e) { /* ignore */ }
     };
     try {
-      const { tmpPath, fileName, size } = await filehost.downloadFromUrl(url, jobDir, (pct) => editStatus(`⬇️ Downloading... ${pct.toFixed(1)}%`));
-      await this.client.editMessage(msg.chatId, { message: status.id, text: `📤 Uploading to Telegram ${humanSize(size)}...` });
-      let lastUploadEdit = 0;
-      await this.client.sendFile(msg.chatId, {
-        file: tmpPath, caption: fileName,
-        progressCallback: (uploaded, total) => {
-          const now = Date.now(); if (now - lastUploadEdit < 4000) return; lastUploadEdit = now;
-          if (!total) return;
-          const pct = ((Number(uploaded) / Number(total)) * 100).toFixed(1);
-          this.client.editMessage(msg.chatId, { message: status.id, text: `📤 Uploading to Telegram... ${pct}%` }).catch(() => {});
-        },
+      const { tmpPath, fileName, size } = await filehost.downloadFromUrl(
+        url, jobDir,
+        (pct) => editStatus(`⬇️ Downloading... ${pct.toFixed(1)}%`),
+      );
+      const labelLine = `📦 ${fileName} (${humanSize(size)})`;
+      userState.pendingPostAction = {
+        filePath: tmpPath, jobDir, fileName,
+        mimeType: guessMime(tmpPath), labelLine,
+        chatId: msg.chatId, messageId: status.id,
+      };
+      await this.client.editMessage(msg.chatId, {
+        message: status.id,
+        text: postDownloadPromptText(labelLine),
+        parseMode: "html",
+        buttons: buildPostDownloadButtons(),
       });
-      const labelLine = `📦 ${fileName}`;
-      const buttons = buildPostDownloadButtons();
-      const promptText = postDownloadPromptText(labelLine, true);
-      if (buttons && promptText) {
-        userState.pendingPostAction = { filePath: tmpPath, jobDir, fileName, mimeType: guessMime(tmpPath), labelLine, chatId: msg.chatId, messageId: status.id };
-        await this.client.editMessage(msg.chatId, { message: status.id, text: promptText, parseMode: "html", buttons }); return;
-      }
-      await this.client.editMessage(msg.chatId, { message: status.id, text: `${labelLine}\n✅ Done.` });
     } catch (err) {
       try { await this.client.editMessage(msg.chatId, { message: status.id, text: `❌ Failed:\n<pre>${escapeHtml(truncate(err.message, 400))}</pre>`, parseMode: "html" }); } catch (e) { /* ignore */ }
       cleanupDir(jobDir);
@@ -515,7 +532,7 @@ class Bot {
     };
 
     try {
-      // ── 1. Extract images ───────────────────────────────────────────────────
+      // 1. Extract images
       const galleries = [];
       const failedUrls = [];
 
@@ -526,22 +543,15 @@ class Bot {
         try {
           let strategy = galleryStrategyEngine.get(url);
           let imageUrls = [];
-          if (strategy) {
-            imageUrls = await galleryScraper.extractImages(url, strategy);
-          }
+          if (strategy) imageUrls = await galleryScraper.extractImages(url, strategy);
           if (!strategy || imageUrls.length === 0) {
             await updateStatus(`🧪 Trying fallback strategies for gallery ${i + 1}/${urls.length}...`);
             const result = await galleryStrategyEngine.findWorking(url, galleryScraper, {
               fallbackLimit: config.gallery.fallbackStrategyLimit,
               minImages: config.gallery.fallbackMinImages,
             });
-            if (result) {
-              imageUrls = result.images;
-            } else {
-              failedUrls.push(url);
-              galleries.push({ name: galleryName, urls: [], useProxy: false });
-              continue;
-            }
+            if (result) { imageUrls = result.images; }
+            else { failedUrls.push(url); galleries.push({ name: galleryName, urls: [], useProxy: false }); continue; }
           }
           galleries.push({ name: galleryName, urls: imageUrls, useProxy: !!(strategy && strategy.useProxy) });
           logger.info(`gallery: extracted ${imageUrls.length} images from ${url}`);
@@ -554,24 +564,15 @@ class Bot {
       }
 
       const totalImages = galleries.reduce((s, g) => s + g.urls.length, 0);
-      if (totalImages === 0) {
-        throw new Error("No images found in any of the provided galleries.");
-      }
+      if (totalImages === 0) throw new Error("No images found in any of the provided galleries.");
 
       if (failedUrls.length > 0) {
-        try {
-          await this.client.sendMessage(chatId, {
-            message: `⚠️ Could not extract images from ${failedUrls.length} URL(s). Continuing with the rest...`,
-          });
-        } catch (e) { /* ignore */ }
+        try { await this.client.sendMessage(chatId, { message: `⚠️ Could not extract images from ${failedUrls.length} URL(s). Continuing with the rest...` }); } catch (e) { /* ignore */ }
       }
 
-      const successfulGalleries = galleries.filter((g) => g.urls.length > 0).length;
-      await updateStatus(
-        `✅ Found ${totalImages} images across ${successfulGalleries} gallery(ies).\n⬇️ Downloading images...`
-      );
+      await updateStatus(`✅ Found ${totalImages} images across ${galleries.filter((g) => g.urls.length > 0).length} gallery(ies).\n⬇️ Downloading images...`);
 
-      // ── 2. Download images ──────────────────────────────────────────────────
+      // 2. Download images
       const downloadResult = await galleryImageDownloader.downloadMultipleGalleries(
         galleries.filter((g) => g.urls.length > 0),
         tempDir,
@@ -586,22 +587,15 @@ class Bot {
       );
 
       if (downloadResult.successImages === 0) {
-        try {
-          await this.client.editMessage(chatId, {
-            message: statusMsgId,
-            text: signal.aborted ? "⚠️ Cancelled. No images were downloaded." : "❌ Failed to download any images.",
-          });
-        } catch (e) { /* ignore */ }
+        try { await this.client.editMessage(chatId, { message: statusMsgId, text: signal.aborted ? "⚠️ Cancelled. No images were downloaded." : "❌ Failed to download any images." }); } catch (e) { /* ignore */ }
         return;
       }
 
-      // ── 3. Create ZIP ───────────────────────────────────────────────────────
+      // 3. Create ZIP
       try {
         await this.client.editMessage(chatId, {
           message: statusMsgId,
-          text: signal.aborted
-            ? `⚠️ Cancelled. Packaging ${downloadResult.successImages} images...`
-            : "📦 Creating ZIP archive...",
+          text: signal.aborted ? `⚠️ Cancelled. Packaging ${downloadResult.successImages} images...` : "📦 Creating ZIP archive...",
         });
       } catch (e) { /* ignore */ }
 
@@ -609,58 +603,27 @@ class Bot {
       const zipPath = await galleryZipCreator.createZip(tempDir, finalName, config.gallery.tempDir);
       const zipFileName = path.basename(zipPath);
       const zipStat = fs.statSync(zipPath);
-      const statusLabel = signal.aborted ? "⚠️ Partial download" : "✅ Download complete";
+      const statusLabel = signal.aborted ? "⚠️ Partial" : "✅ Complete";
+      const labelLine = `🖼 ${zipFileName} — ${statusLabel} — ${downloadResult.successImages} images — ${humanSize(zipStat.size)}`;
 
-      // ── 4. Upload to Telegram ───────────────────────────────────────────────
+      // 4. Show action buttons — NO upload yet
+      userState.pendingPostAction = {
+        filePath: zipPath,
+        jobDir: path.dirname(zipPath),
+        fileName: zipFileName,
+        mimeType: "application/zip",
+        labelLine,
+        chatId,
+        messageId: statusMsgId,
+      };
       try {
         await this.client.editMessage(chatId, {
           message: statusMsgId,
-          text: `📤 Uploading <b>${escapeHtml(zipFileName)}</b> to Telegram (${humanSize(zipStat.size)})...`,
+          text: postDownloadPromptText(labelLine),
           parseMode: "html",
+          buttons: buildPostDownloadButtons(),
         });
       } catch (e) { /* ignore */ }
-
-      let lastUploadEdit = 0;
-      await this.client.sendFile(chatId, {
-        file: zipPath,
-        caption: `📦 ${zipFileName}\n${statusLabel}\n🖼 ${downloadResult.successImages} images | 💾 ${humanSize(zipStat.size)}`,
-        forceDocument: true,
-        progressCallback: (uploaded, total) => {
-          const now = Date.now();
-          if (now - lastUploadEdit < 4000) return;
-          lastUploadEdit = now;
-          if (!total) return;
-          const pct = ((Number(uploaded) / Number(total)) * 100).toFixed(1);
-          this.client.editMessage(chatId, {
-            message: statusMsgId,
-            text: `📤 Uploading <b>${escapeHtml(zipFileName)}</b>... ${pct}%`,
-            parseMode: "html",
-          }).catch(() => {});
-        },
-      });
-
-      // ── 5. Post-action buttons ──────────────────────────────────────────────
-      const labelLine = `🖼 ${zipFileName}`;
-      const buttons = buildPostDownloadButtons();
-      const promptText = postDownloadPromptText(labelLine, true);
-
-      if (buttons && promptText) {
-        userState.pendingPostAction = {
-          filePath: zipPath,
-          jobDir: path.dirname(zipPath),
-          fileName: zipFileName,
-          mimeType: "application/zip",
-          labelLine,
-          chatId,
-          messageId: statusMsgId,
-        };
-        try {
-          await this.client.editMessage(chatId, { message: statusMsgId, text: promptText, parseMode: "html", buttons });
-        } catch (e) { /* ignore */ }
-      } else {
-        try { await this.client.editMessage(chatId, { message: statusMsgId, text: `${labelLine}\n✅ Done.` }); } catch (e) { /* ignore */ }
-        try { fs.unlinkSync(zipPath); } catch (e) { /* ignore */ }
-      }
 
       logger.info(`gallery: job complete for user ${senderId}: ${zipFileName}`);
     } catch (err) {
@@ -673,10 +636,8 @@ class Bot {
         });
       } catch (e) { /* ignore */ }
     } finally {
-      // Clean up temp image staging dir (not the zip — post-action needs it)
       cleanupDir(tempDir);
       if (!state.get(senderId).pendingPostAction) {
-        // Also clean zip if no post-action
         try { fs.rmSync(path.join(config.gallery.tempDir, String(senderId)), { recursive: true, force: true }); } catch (e) { /* ignore */ }
       }
       userState.galleryState = null;
@@ -703,33 +664,22 @@ class Bot {
       const action = data.slice(8);
 
       if (action === "start") {
-        if (!userState.galleryPendingJob) {
-          await event.answer({ message: "Session expired.", alert: true }); return;
-        }
+        if (!userState.galleryPendingJob) { await event.answer({ message: "Session expired.", alert: true }); return; }
         await event.answer({ message: "Starting..." });
-        try {
-          await this.client.editMessage(event.chatId, { message: Number(event.messageId), text: "🚀 Starting gallery download..." });
-        } catch (e) { /* ignore */ }
+        try { await this.client.editMessage(event.chatId, { message: Number(event.messageId), text: "🚀 Starting gallery download..." }); } catch (e) { /* ignore */ }
         const { urls, archiveName } = userState.galleryPendingJob;
-        // Run async — don't await so callback returns immediately
         this.safeHandle(() => this.runGalleryJob(senderId, event.chatId, Number(event.messageId), urls, archiveName));
         return;
       }
 
       if (action === "rename") {
-        if (!userState.galleryPendingJob) {
-          await event.answer({ message: "Session expired.", alert: true }); return;
-        }
+        if (!userState.galleryPendingJob) { await event.answer({ message: "Session expired.", alert: true }); return; }
         userState.galleryState = "renaming";
         await event.answer({});
         try {
           await this.client.editMessage(event.chatId, {
             message: Number(event.messageId),
-            text:
-              "✏️ Type your custom archive name:\n\n" +
-              "Allowed: letters, numbers, <code>- _ .</code> (must start with letter/digit)\n" +
-              "Example: <code>my-gallery_2026</code>\n\n" +
-              "Or send /cancel to abort.",
+            text: "✏️ Type your custom archive name:\n\nAllowed: letters, numbers, <code>- _ .</code> (must start with letter/digit)\nExample: <code>my-gallery_2026</code>\n\nOr send /cancel to abort.",
             parseMode: "html",
           });
         } catch (e) { /* ignore */ }
@@ -744,12 +694,8 @@ class Bot {
       }
 
       if (action === "abort") {
-        if (userState.galleryAbortController) {
-          userState.galleryAbortController.abort();
-          await event.answer({ message: "Cancelling..." });
-        } else {
-          await event.answer({ message: "No active download." });
-        }
+        if (userState.galleryAbortController) { userState.galleryAbortController.abort(); await event.answer({ message: "Cancelling..." }); }
+        else { await event.answer({ message: "No active download." }); }
         return;
       }
 
@@ -809,9 +755,7 @@ class Bot {
 
     const parts = data.split(":");
     const kind = parts[0];
-    if (kind !== "a" && kind !== "v") {
-      await event.answer({ message: "Unknown action.", alert: true }); return;
-    }
+    if (kind !== "a" && kind !== "v") { await event.answer({ message: "Unknown action.", alert: true }); return; }
 
     userState.activeJob = true;
     const url = userState.pendingUrl;
@@ -831,6 +775,7 @@ class Bot {
   }
 
   // ── video download job ────────────────────────────────────────────────────────
+  // Download → show action buttons (no upload yet)
 
   async runVideoJob(event, senderId, url, kind, parts, probeInfo) {
     const chatId = event.chatId;
@@ -900,59 +845,101 @@ class Bot {
         throw new Error(`File too large (${humanSize(stat.size)} > ${humanSize(config.maxUploadBytes)}). Try a lower quality.`);
       }
 
-      await this.client.editMessage(chatId, { message: messageId, text: `${labelLine}\n📤 Uploading ${humanSize(stat.size)}...` });
-
-      const isAudio = kind === "a";
       const fileName = path.basename(outputFile);
-      const attributes = isAudio ? [new Api.DocumentAttributeAudio({ duration: 0, title: stripExt(fileName) })] : undefined;
+      const fullLabelLine = `${labelLine} — ${humanSize(stat.size)}`;
 
-      let lastUploadEdit = 0;
-      await this.client.sendFile(chatId, {
-        file: outputFile, caption: stripExt(fileName), supportsStreaming: !isAudio, attributes,
-        progressCallback: (uploaded, total) => {
-          const now = Date.now(); if (now - lastUploadEdit < 4000) return; lastUploadEdit = now;
-          if (!total) return;
-          const pct = ((Number(uploaded) / Number(total)) * 100).toFixed(1);
-          this.client.editMessage(chatId, { message: messageId, text: `${labelLine}\n📤 Uploading... ${pct}%` }).catch(() => {});
-        },
+      const userState = state.get(senderId);
+      userState.pendingPostAction = {
+        filePath: outputFile, jobDir, fileName,
+        mimeType: guessMime(outputFile), labelLine: fullLabelLine,
+        chatId, messageId,
+        isAudio: kind === "a",
+      };
+      await this.client.editMessage(chatId, {
+        message: messageId,
+        text: postDownloadPromptText(fullLabelLine),
+        parseMode: "html",
+        buttons: buildPostDownloadButtons(),
       });
-
-      const buttons = buildPostDownloadButtons();
-      const promptText = postDownloadPromptText(labelLine, true);
-      if (buttons && promptText) {
-        const userState = state.get(senderId);
-        userState.pendingPostAction = { filePath: outputFile, jobDir, fileName, mimeType: guessMime(outputFile), labelLine, chatId, messageId };
-        await this.client.editMessage(chatId, { message: messageId, text: promptText, parseMode: "html", buttons }); return;
-      }
-      await this.client.editMessage(chatId, { message: messageId, text: `${labelLine}\n✅ Done.` });
     } finally {
       if (!state.get(senderId).pendingPostAction) cleanupDir(jobDir);
     }
   }
 
   // ── shared post-download action ───────────────────────────────────────────────
+  //
+  // Actions:
+  //   tg          → upload to Telegram only          → delete after
+  //   drive       → upload to Drive only             → delete after
+  //   link        → register in filehost             → keep until retention
+  //   drive+link  → Drive + filehost                 → keep until retention
+  //   drive+tg    → Drive + Telegram                 → delete after
+  //   link+tg     → filehost + Telegram              → keep until retention
+  //   all         → Drive + filehost + Telegram      → keep until retention
+  //   none        → discard                          → delete
 
   async handlePostAction(action, pending) {
-    const { filePath, jobDir, fileName, mimeType, labelLine, chatId, messageId } = pending;
+    const { filePath, jobDir, fileName, mimeType, labelLine, chatId, messageId, isAudio } = pending;
+
     const edit = async (text, parseMode) => {
       try { await this.client.editMessage(chatId, { message: messageId, text, parseMode: parseMode || undefined }); } catch (e) { /* ignore */ }
     };
 
-    if (action === "none") {
-      await edit(`${labelLine}\n✅ Done.`);
+    const cleanup = () => {
       cleanupDir(jobDir);
-      // Also delete single file if it's outside jobDir (e.g. gallery zip in tempDir)
       if (!filePath.startsWith(jobDir)) { try { fs.unlinkSync(filePath); } catch (e) { /* ignore */ } }
+    };
+
+    if (action === "none") {
+      await edit(`${labelLine}\n✅ Discarded.`);
+      cleanup();
       return;
     }
 
+    const wantTg    = action === "tg" || action === "drive+tg" || action === "link+tg" || action === "all";
+    const wantDrive = action === "drive" || action === "drive+link" || action === "drive+tg" || action === "all";
+    const wantLink  = action === "link" || action === "drive+link" || action === "link+tg" || action === "all";
+    // Files with a direct link must be kept; others can be deleted after processing
+    const keepFile  = wantLink;
+
+    await edit(`${labelLine}\n⏳ Processing...`);
+
+    let tgDone = false;
+    let driveLinks = null;
+    let directUrl = null;
+    const errors = [];
+
+    // ── Telegram upload ───────────────────────────────────────────────────────
+    const doTelegram = async () => {
+      const stat = fs.statSync(filePath);
+      await edit(`${labelLine}\n📤 Uploading to Telegram ${humanSize(stat.size)}...`);
+      const useAudio = isAudio ?? (mimeType && mimeType.startsWith("audio/"));
+      const attributes = useAudio ? [new Api.DocumentAttributeAudio({ duration: 0, title: stripExt(fileName) })] : undefined;
+      let lastUploadEdit = 0;
+      await this.client.sendFile(chatId, {
+        file: filePath,
+        caption: useAudio ? stripExt(fileName) : fileName,
+        supportsStreaming: !useAudio,
+        forceDocument: !useAudio && mimeType === "application/zip",
+        attributes,
+        progressCallback: (uploaded, total) => {
+          const now = Date.now(); if (now - lastUploadEdit < 4000) return; lastUploadEdit = now;
+          if (!total) return;
+          const pct = ((Number(uploaded) / Number(total)) * 100).toFixed(1);
+          this.client.editMessage(chatId, { message: messageId, text: `${labelLine}\n📤 Uploading to Telegram... ${pct}%` }).catch(() => {});
+        },
+      });
+      tgDone = true;
+    };
+
+    // ── Drive upload ──────────────────────────────────────────────────────────
     const doDrive = async () => {
       await edit(`${labelLine}\n☁️ Uploading to Google Drive... 0%`);
-      let lastEdit = 0;
+      let lastDriveEdit = 0;
       const fileData = await drive.uploadFile({
         filePath, fileName, mimeType, parentId: config.drive.folderId,
         onProgress: async (pct) => {
-          const now = Date.now(); if (now - lastEdit < 3000) return; lastEdit = now;
+          const now = Date.now(); if (now - lastDriveEdit < 3000) return; lastDriveEdit = now;
           await edit(`${labelLine}\n☁️ Uploading to Google Drive... ${pct.toFixed(1)}%`);
         },
       });
@@ -961,43 +948,58 @@ class Bot {
       return drive.buildLinks(fileData.id, fileData.mimeType);
     };
 
-    const doLink = async () => {
-      const result = await filehost.registerFile(filePath, fileName);
-      logger.info(`Filehost registered: ${result.url}`);
-      return result.url;
-    };
+    // ── Execute in order: TG → Drive → Link ──────────────────────────────────
+    // TG first so if something fails after, the user at least has the file.
+    if (wantTg) {
+      try { await doTelegram(); }
+      catch (err) { logger.error("TG upload failed:", err.message); errors.push(`📱 Telegram upload failed: ${truncate(err.message, 200)}`); }
+    }
 
-    const cleanup = () => {
-      cleanupDir(jobDir);
-      if (!filePath.startsWith(jobDir)) { try { fs.unlinkSync(filePath); } catch (e) { /* ignore */ } }
-    };
-
-    try {
-      if (action === "drive") {
-        const links = await doDrive();
-        await edit(`${labelLine}\n✅ Done.\n\n☁️ <b>Google Drive (public):</b>\n<a href="${links.view}">View</a> | <a href="${links.download}">Download</a>`, "html");
-        cleanup();
-      } else if (action === "link") {
-        await edit(`${labelLine}\n🔗 Registering direct link...`);
-        const url = await doLink();
-        await edit(`${labelLine}\n✅ Done.\n\n🔗 <b>Direct Link:</b>\n<code>${escapeHtml(url)}</code>`, "html");
-        cleanup();
-      } else if (action === "both") {
-        await edit(`${labelLine}\n⏳ Processing...`);
-        const driveLinks = await doDrive().catch((e) => { logger.error("Drive upload failed:", e.message); return null; });
-        const directUrl = await doLink();
-        let resultText = `${labelLine}\n✅ Done.\n\n`;
-        if (driveLinks) resultText += `☁️ <b>Google Drive:</b> <a href="${driveLinks.view}">View</a> | <a href="${driveLinks.download}">Download</a>\n`;
-        else resultText += `☁️ Google Drive upload failed.\n`;
-        resultText += `🔗 <b>Direct Link:</b>\n<code>${escapeHtml(directUrl)}</code>`;
-        await edit(resultText, "html");
-        cleanup();
+    if (wantDrive) {
+      try { driveLinks = await doDrive(); }
+      catch (err) {
+        logger.error("Drive upload failed:", err.message);
+        const hint = drive.isInvalidGrant(err) ? " (re-run setup-drive.js)" : "";
+        errors.push(`☁️ Drive upload failed${hint}: ${truncate(err.message, 200)}`);
       }
-    } catch (err) {
-      logger.error(`Post-action "${action}" failed:`, err.message);
-      const hint = drive.isInvalidGrant(err) ? "\n\nRun <code>node setup-drive.js</code> to refresh the token." : "";
-      await edit(`${labelLine}\n✅ Sent to Telegram.\n\n❌ Post-action failed: <pre>${escapeHtml(truncate(err.message, 300))}</pre>${hint}`, "html");
+    }
+
+    if (wantLink) {
+      try {
+        const result = await filehost.registerFile(filePath, fileName);
+        directUrl = result.url;
+        logger.info(`Filehost registered: ${directUrl}`);
+      } catch (err) {
+        logger.error("Filehost registration failed:", err.message);
+        errors.push(`🔗 Direct link failed: ${truncate(err.message, 200)}`);
+      }
+    }
+
+    // ── Build result message ──────────────────────────────────────────────────
+    let resultText = `${labelLine}\n✅ Done.\n\n`;
+
+    if (tgDone)     resultText += "📱 <b>Telegram:</b> sent above\n";
+    if (driveLinks) resultText += `☁️ <b>Google Drive:</b> <a href="${driveLinks.view}">View</a> | <a href="${driveLinks.download}">Download</a>\n`;
+    if (directUrl)  resultText += `🔗 <b>Direct Link:</b>\n<code>${escapeHtml(directUrl)}</code>\n`;
+
+    if (errors.length > 0) {
+      resultText += "\n⚠️ <b>Errors:</b>\n" + errors.map((e) => `• ${escapeHtml(e)}`).join("\n");
+    }
+
+    await edit(resultText.trim(), "html");
+
+    // ── Cleanup ───────────────────────────────────────────────────────────────
+    // Keep file only if it was registered in filehost (nginx needs it).
+    // In all other cases, delete.
+    if (!keepFile || !directUrl) {
       cleanup();
+    } else {
+      // Only clean up the jobDir wrapper, not the file itself
+      // (registerFile already moved it to serveDir)
+      cleanupDir(jobDir);
+      if (!filePath.startsWith(jobDir)) {
+        // file was already moved by registerFile, nothing to do
+      }
     }
   }
 
