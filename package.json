@@ -1,18 +1,22 @@
 {
   "name": "tg-hub",
   "version": "1.0.0",
-  "description": "Telegram bot to download videos via yt-dlp with optional Google Drive upload",
+  "description": "Telegram bot: video download, file host, gallery scraper — with Google Drive + direct link",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "setup-drive": "node setup-drive.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
+    "axios": "^1.7.9",
     "dotenv": "^16.4.5",
     "googleapis": "^144.0.0",
+    "jsdom": "^25.0.1",
+    "socks-proxy-agent": "^8.0.5",
     "telegram": "^2.26.16"
   },
   "private": true
