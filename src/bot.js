@@ -88,6 +88,7 @@ class Bot {
       { command: "start", description: "Start the bot" },
       { command: "help", description: "Show usage instructions" },
       { command: "cancel", description: "Cancel the current operation" },
+      { command: "setcookies", description: "Set cookies for restricted content" },
       { command: "clearcookies", description: "Clear saved cookies" },
     ].map(
       (c) =>
@@ -142,6 +143,25 @@ class Bot {
     if (text.startsWith("/cancel")) {
       state.reset(senderId);
       await msg.reply({ message: "✅ State reset. Send a new link." });
+      return;
+    }
+
+    if (text.startsWith("/setcookies")) {
+      userState.waitingForCookies = true;
+      await msg.reply({
+        message:
+          "🍪 <b>Set Cookies</b>\n\n" +
+          "To provide cookies, choose one of these methods:\n\n" +
+          "<b>Method 1 — Paste as text:</b>\n" +
+          "1. Install the <b>Get cookies.txt LOCALLY</b> extension in your browser.\n" +
+          "2. Log in to the site and open the video page.\n" +
+          "3. Click the extension and export cookies.\n" +
+          "4. Open the downloaded file, copy ALL contents, and paste here.\n\n" +
+          "<b>Method 2 — Send as file:</b>\n" +
+          "Same as above, but instead of pasting, send the <code>cookies.txt</code> file directly to this chat.\n\n" +
+          "Send /cancel to abort.",
+        parseMode: "html",
+      });
       return;
     }
 
@@ -234,10 +254,9 @@ class Bot {
       "<b>Commands:</b>\n" +
       "/start, /help — this message\n" +
       "/cancel — reset state\n" +
+      "/setcookies — set cookies for age-restricted or login-required content\n" +
       "/clearcookies — delete saved cookies\n\n" +
-      "<b>Cookies:</b> If a site requires login, install the <b>Get cookies.txt LOCALLY</b> " +
-      "browser extension, export your cookies, and either paste the file contents " +
-      "as a text message OR send the cookies.txt file directly to me." +
+      "<b>Cookies:</b> If a site requires login, use /setcookies and follow the instructions." +
       driveNote;
     await msg.reply({ message: help, parseMode: "html" });
   }
@@ -259,12 +278,7 @@ class Bot {
           message: status.id,
           text:
             "🔒 This URL seems to require cookies (login/age/region).\n\n" +
-            "Please:\n" +
-            "1. Install the <b>Get cookies.txt LOCALLY</b> extension in your browser.\n" +
-            "2. Open the site and log in.\n" +
-            "3. Export cookies for that domain.\n" +
-            "4. Either paste the cookies.txt content as text OR send the cookies.txt file here.\n\n" +
-            "Then send the link again to retry.",
+            "Use /setcookies to provide your cookies, then send the link again.",
           parseMode: "html",
         });
       } else {
@@ -716,9 +730,7 @@ class Bot {
           message: Number(event.messageId),
           text:
             "🔒 Cookies are required for this content.\n\n" +
-            "Use the <b>Get cookies.txt LOCALLY</b> extension, export the cookies " +
-            "for that site, and either paste the file contents as text OR send " +
-            "the cookies.txt file. Then send the link again.",
+            "Use /setcookies to provide your cookies, then send the link again.",
           parseMode: "html",
         });
       } catch (e) { /* ignore */ }
