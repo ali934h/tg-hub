@@ -1,4 +1,5 @@
 const fs = require("fs");
+const fsp = require("fs").promises;
 const path = require("path");
 const { Api } = require("telegram");
 const { NewMessage } = require("telegram/events");
@@ -91,19 +92,98 @@ function hasTelegramFile(msg) {
     (msg.media && (msg.media.document || msg.media.photo)));
 }
 
+// ── Storage helpers ───────────────────────────────────────────────────────────
+
+/**
+ * Recursively sum the size of all files in a directory.
+ * Returns 0 if the directory doesn't exist.
+ */
+async function dirSize(dirPath) {
+  let total = 0;
+  try {
+    const entries = await fsp.readdir(dirPath, { withFileTypes: true });
+    for (const e of entries) {
+      const full = path.join(dirPath, e.name);
+      if (e.isDirectory()) {
+        total += await dirSize(full);
+      } else if (e.isFile()) {
+        try { total += (await fsp.stat(full)).size; } catch (_) { /* ignore */ }
+      }
+    }
+  } catch (e) {
+    if (e.code !== "ENOENT") logger.warn(`dirSize error for ${dirPath}: ${e.message}`);
+  }
+  return total;
+}
+
+/**
+ * Count files (non-recursive top-level, excluding .json sidecars) in serveDir.
+ */
+async function countHostedFiles(serveDir) {
+  try {
+    const entries = await fsp.readdir(serveDir, { withFileTypes: true });
+    return entries.filter((e) => e.isFile() && !e.name.endsWith(".json") && !e.name.startsWith(".")).length;
+  } catch (e) {
+    return 0;
+  }
+}
+
+/**
+ * Delete all files (and their .json sidecars) from serveDir.
+ * Skips the directory itself so nginx keeps serving.
+ * Returns { deleted, freedBytes }.
+ */
+async function clearServeDir(serveDir) {
+  let deleted = 0;
+  let freedBytes = 0;
+  try {
+    const entries = await fsp.readdir(serveDir, { withFileTypes: true });
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      const full = path.join(serveDir, e.name);
+      try {
+        const stat = await fsp.stat(full);
+        await fsp.unlink(full);
+        freedBytes += stat.size;
+        deleted++;
+      } catch (_) { /* ignore */ }
+    }
+  } catch (e) {
+    if (e.code !== "ENOENT") logger.warn(`clearServeDir error: ${e.message}`);
+  }
+  return { deleted, freedBytes };
+}
+
+function buildStorageKeyboard(confirmDelete = false) {
+  if (confirmDelete) {
+    return [
+      [Button.inline("✅ Yes, delete all", Buffer.from("storage:confirm_delete")), Button.inline("❌ Cancel", Buffer.from("storage:cancel_delete"))],
+    ];
+  }
+  return [
+    [Button.inline("🗑 Delete All", Buffer.from("storage:delete")), Button.inline("✖️ Close", Buffer.from("storage:close"))],
+  ];
+}
+
+async function buildStorageText() {
+  const serveDir = config.filehost.serveDir;
+  const [size, count] = await Promise.all([
+    dirSize(serveDir),
+    countHostedFiles(serveDir),
+  ]);
+  const retention = config.filehost.retentionDays > 0
+    ? `Auto-delete after: ${config.filehost.retentionDays} day(s)`
+    : "Auto-delete: disabled (kept forever)";
+  return (
+    "🗂 <b>Filehost Storage</b>\n\n" +
+    `📦 Files:  <b>${count}</b>\n` +
+    `💾 Size:   <b>${humanSize(size)}</b>\n\n` +
+    `<i>${retention}</i>`
+  );
+}
+
 // ── Post-download 8-button keyboard ──────────────────────────────────────────
-//
-// Always shows all 8 options. Which options are actually available depends on
-// what features are configured; unavailable rows are omitted so the keyboard
-// adapts gracefully:
-//
-//   drive + filehost enabled  → 8 buttons (4 rows of 2)
-//   drive only                → 4 buttons (2 rows: tg+drive, drive+none)
-//   filehost only             → 4 buttons (2 rows: tg+link, link+none)
-//   neither                   → 2 buttons (1 row: tg | none)
-//
-// Action codes:   tg | drive | link | drive+link | drive+tg | link+tg | all | none
-//
+
 function buildPostDownloadButtons() {
   const d = config.drive.enabled;
   const f = config.filehost.enabled;
@@ -128,7 +208,6 @@ function buildPostDownloadButtons() {
       [Button.inline("🔗📱 Link + TG", Buffer.from("post:link+tg")),   Button.inline("❌ None", Buffer.from("post:none"))],
     ];
   }
-  // Neither Drive nor filehost configured — only Telegram or nothing
   return [
     [Button.inline("📱 Send to Telegram", Buffer.from("post:tg")), Button.inline("❌ None", Buffer.from("post:none"))],
   ];
@@ -194,6 +273,7 @@ class Bot {
       { command: "clearvideocookies", description: "Clear saved video cookies" },
       { command: "filehost",          description: "Download a file from URL or Telegram post" },
       { command: "gallery",           description: "Scrape and download images from a gallery page" },
+      { command: "storage",           description: "View and manage filehost storage" },
       { command: "cancel",            description: "Cancel the current operation" },
     ].map((c) => new Api.BotCommand({ command: c.command, description: c.description }));
     await this.client.invoke(
@@ -279,6 +359,20 @@ class Bot {
           "Send /cancel to abort.",
         parseMode: "html",
       }); return;
+    }
+
+    // ── /storage ──────────────────────────────────────────────────────────────
+    if (text.startsWith("/storage")) {
+      if (!config.filehost.enabled) {
+        await msg.reply({ message: "⚠️ Filehost is not configured. No storage to manage." }); return;
+      }
+      const storageText = await buildStorageText();
+      await msg.reply({
+        message: storageText,
+        parseMode: "html",
+        buttons: buildStorageKeyboard(),
+      });
+      return;
     }
 
     // ── waiting for cookies ───────────────────────────────────────────────────
@@ -390,6 +484,7 @@ class Bot {
       "/video — download a video or audio\n" +
       "/gallery — scrape and download images from a gallery page\n" +
       "/filehost — download a file from a URL or Telegram post\n" +
+      "/storage — view and manage filehost storage\n" +
       "/setvideocookies — set cookies for restricted video content\n" +
       "/clearvideocookies — delete saved video cookies\n" +
       "/cancel — cancel the current operation\n" +
@@ -432,7 +527,6 @@ class Bot {
   }
 
   // ── /filehost flow — Telegram file ───────────────────────────────────────────
-  // Download from Telegram → show action buttons (no re-upload yet)
 
   async handleFilehostTelegram(msg, senderId) {
     const userState = state.get(senderId);
@@ -471,7 +565,6 @@ class Bot {
   }
 
   // ── /filehost flow — direct URL ───────────────────────────────────────────────
-  // Download from URL → show action buttons (no upload yet)
 
   async handleFilehostUrl(msg, senderId, url) {
     const userState = state.get(senderId);
@@ -532,7 +625,6 @@ class Bot {
     };
 
     try {
-      // 1. Extract images
       const galleries = [];
       const failedUrls = [];
 
@@ -572,7 +664,6 @@ class Bot {
 
       await updateStatus(`✅ Found ${totalImages} images across ${galleries.filter((g) => g.urls.length > 0).length} gallery(ies).\n⬇️ Downloading images...`);
 
-      // 2. Download images
       const downloadResult = await galleryImageDownloader.downloadMultipleGalleries(
         galleries.filter((g) => g.urls.length > 0),
         tempDir,
@@ -591,7 +682,6 @@ class Bot {
         return;
       }
 
-      // 3. Create ZIP
       try {
         await this.client.editMessage(chatId, {
           message: statusMsgId,
@@ -606,7 +696,6 @@ class Bot {
       const statusLabel = signal.aborted ? "⚠️ Partial" : "✅ Complete";
       const labelLine = `🖼 ${zipFileName} — ${statusLabel} — ${downloadResult.successImages} images — ${humanSize(zipStat.size)}`;
 
-      // 4. Show action buttons — NO upload yet
       userState.pendingPostAction = {
         filePath: zipPath,
         jobDir: path.dirname(zipPath),
@@ -658,6 +747,79 @@ class Bot {
 
     const data = event.data ? event.data.toString() : "";
     const userState = state.get(senderId);
+
+    // ── storage callbacks ─────────────────────────────────────────────────────
+    if (data.startsWith("storage:")) {
+      const action = data.slice(8);
+
+      if (action === "close") {
+        await event.answer({});
+        try { await this.client.editMessage(event.chatId, { message: Number(event.messageId), text: "✖️ Closed." }); } catch (e) { /* ignore */ }
+        return;
+      }
+
+      if (action === "delete") {
+        // Show confirmation
+        await event.answer({});
+        const serveDir = config.filehost.serveDir;
+        const [size, count] = await Promise.all([dirSize(serveDir), countHostedFiles(serveDir)]);
+        try {
+          await this.client.editMessage(event.chatId, {
+            message: Number(event.messageId),
+            text:
+              "⚠️ <b>Confirm Delete All</b>\n\n" +
+              `This will permanently delete <b>${count} file(s)</b> (${humanSize(size)}) from filehost storage.\n\n` +
+              "All direct links will stop working.\n\n" +
+              "Are you sure?",
+            parseMode: "html",
+            buttons: buildStorageKeyboard(true),
+          });
+        } catch (e) { /* ignore */ }
+        return;
+      }
+
+      if (action === "cancel_delete") {
+        // Go back to storage view
+        await event.answer({ message: "Cancelled." });
+        try {
+          const storageText = await buildStorageText();
+          await this.client.editMessage(event.chatId, {
+            message: Number(event.messageId),
+            text: storageText,
+            parseMode: "html",
+            buttons: buildStorageKeyboard(),
+          });
+        } catch (e) { /* ignore */ }
+        return;
+      }
+
+      if (action === "confirm_delete") {
+        await event.answer({ message: "Deleting..." });
+        try {
+          await this.client.editMessage(event.chatId, {
+            message: Number(event.messageId),
+            text: "🗑 Deleting all files...",
+          });
+        } catch (e) { /* ignore */ }
+
+        const { deleted, freedBytes } = await clearServeDir(config.filehost.serveDir);
+        logger.info(`storage: deleted ${deleted} file(s), freed ${humanSize(freedBytes)}`);
+
+        try {
+          await this.client.editMessage(event.chatId, {
+            message: Number(event.messageId),
+            text:
+              "✅ <b>Done.</b>\n\n" +
+              `🗑 Deleted: <b>${deleted} file(s)</b>\n` +
+              `💾 Freed:   <b>${humanSize(freedBytes)}</b>`,
+            parseMode: "html",
+          });
+        } catch (e) { /* ignore */ }
+        return;
+      }
+
+      await event.answer({}); return;
+    }
 
     // ── gallery callbacks ─────────────────────────────────────────────────────
     if (data.startsWith("gallery:")) {
@@ -775,7 +937,6 @@ class Bot {
   }
 
   // ── video download job ────────────────────────────────────────────────────────
-  // Download → show action buttons (no upload yet)
 
   async runVideoJob(event, senderId, url, kind, parts, probeInfo) {
     const chatId = event.chatId;
@@ -867,16 +1028,6 @@ class Bot {
   }
 
   // ── shared post-download action ───────────────────────────────────────────────
-  //
-  // Actions:
-  //   tg          → upload to Telegram only          → delete after
-  //   drive       → upload to Drive only             → delete after
-  //   link        → register in filehost             → keep until retention
-  //   drive+link  → Drive + filehost                 → keep until retention
-  //   drive+tg    → Drive + Telegram                 → delete after
-  //   link+tg     → filehost + Telegram              → keep until retention
-  //   all         → Drive + filehost + Telegram      → keep until retention
-  //   none        → discard                          → delete
 
   async handlePostAction(action, pending) {
     const { filePath, jobDir, fileName, mimeType, labelLine, chatId, messageId, isAudio } = pending;
@@ -899,7 +1050,6 @@ class Bot {
     const wantTg    = action === "tg" || action === "drive+tg" || action === "link+tg" || action === "all";
     const wantDrive = action === "drive" || action === "drive+link" || action === "drive+tg" || action === "all";
     const wantLink  = action === "link" || action === "drive+link" || action === "link+tg" || action === "all";
-    // Files with a direct link must be kept; others can be deleted after processing
     const keepFile  = wantLink;
 
     await edit(`${labelLine}\n⏳ Processing...`);
@@ -909,7 +1059,6 @@ class Bot {
     let directUrl = null;
     const errors = [];
 
-    // ── Telegram upload ───────────────────────────────────────────────────────
     const doTelegram = async () => {
       const stat = fs.statSync(filePath);
       await edit(`${labelLine}\n📤 Uploading to Telegram ${humanSize(stat.size)}...`);
@@ -932,7 +1081,6 @@ class Bot {
       tgDone = true;
     };
 
-    // ── Drive upload ──────────────────────────────────────────────────────────
     const doDrive = async () => {
       await edit(`${labelLine}\n☁️ Uploading to Google Drive... 0%`);
       let lastDriveEdit = 0;
@@ -948,8 +1096,6 @@ class Bot {
       return drive.buildLinks(fileData.id, fileData.mimeType);
     };
 
-    // ── Execute in order: TG → Drive → Link ──────────────────────────────────
-    // TG first so if something fails after, the user at least has the file.
     if (wantTg) {
       try { await doTelegram(); }
       catch (err) { logger.error("TG upload failed:", err.message); errors.push(`📱 Telegram upload failed: ${truncate(err.message, 200)}`); }
@@ -975,31 +1121,18 @@ class Bot {
       }
     }
 
-    // ── Build result message ──────────────────────────────────────────────────
     let resultText = `${labelLine}\n✅ Done.\n\n`;
-
     if (tgDone)     resultText += "📱 <b>Telegram:</b> sent above\n";
     if (driveLinks) resultText += `☁️ <b>Google Drive:</b> <a href="${driveLinks.view}">View</a> | <a href="${driveLinks.download}">Download</a>\n`;
     if (directUrl)  resultText += `🔗 <b>Direct Link:</b>\n<code>${escapeHtml(directUrl)}</code>\n`;
-
-    if (errors.length > 0) {
-      resultText += "\n⚠️ <b>Errors:</b>\n" + errors.map((e) => `• ${escapeHtml(e)}`).join("\n");
-    }
+    if (errors.length > 0) resultText += "\n⚠️ <b>Errors:</b>\n" + errors.map((e) => `• ${escapeHtml(e)}`).join("\n");
 
     await edit(resultText.trim(), "html");
 
-    // ── Cleanup ───────────────────────────────────────────────────────────────
-    // Keep file only if it was registered in filehost (nginx needs it).
-    // In all other cases, delete.
     if (!keepFile || !directUrl) {
       cleanup();
     } else {
-      // Only clean up the jobDir wrapper, not the file itself
-      // (registerFile already moved it to serveDir)
       cleanupDir(jobDir);
-      if (!filePath.startsWith(jobDir)) {
-        // file was already moved by registerFile, nothing to do
-      }
     }
   }
 
