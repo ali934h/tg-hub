@@ -45,7 +45,6 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
-// Guess MIME type from file extension
 function guessMime(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   const map = {
@@ -227,7 +226,7 @@ class Bot {
 
   async sendHelp(msg) {
     const driveNote = config.drive.enabled
-      ? "\n\n<b>Google Drive:</b> After each download, the bot will ask if you want to upload the file to Google Drive."
+      ? "\n\n<b>Google Drive:</b> After each download, the bot will ask if you want to upload the file to Google Drive (public link)."
       : "";
     const help =
       "🎬 <b>tg-hub bot</b>\n\n" +
@@ -373,12 +372,16 @@ class Bot {
           },
         });
 
+        // Make the file publicly accessible so anyone with the link can download it
+        await drive.makePublic(fileData.id);
+        logger.info(`Drive file made public: ${fileData.id}`);
+
         const links = drive.buildLinks(fileData.id, fileData.mimeType);
         await this.client.editMessage(pending.chatId, {
           message: pending.messageId,
           text:
             `${pending.labelLine}\n✅ Done.\n\n` +
-            `☁️ <b>Google Drive:</b>\n` +
+            `☁️ <b>Google Drive (public):</b>\n` +
             `<a href="${links.view}">View</a> | <a href="${links.download}">Download</a>`,
           parseMode: "html",
         });
@@ -686,20 +689,17 @@ class Bot {
 
         await this.client.editMessage(chatId, {
           message: messageId,
-          text: `${labelLine}\n✅ Sent to Telegram.\n\n☁️ Upload to Google Drive?`,
+          text: `${labelLine}\n✅ Sent to Telegram.\n\n☁️ Upload to Google Drive (public link)?`,
           buttons: driveButtons,
         });
-        // Do NOT clean up yet — drive.js will clean up after the decision.
         return;
       }
 
-      // Drive not configured — just mark done and cleanup.
       await this.client.editMessage(chatId, {
         message: messageId,
         text: `${labelLine}\n✅ Done.`,
       });
     } finally {
-      // Only clean up if Drive upload is not pending.
       const userState = state.get(senderId);
       if (!userState.pendingDriveUpload) {
         cleanupDir(jobDir);
