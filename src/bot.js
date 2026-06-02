@@ -21,16 +21,6 @@ const {
 
 const URL_REGEX = /(https?:\/\/[^\s]+)/i;
 
-// All commands — used to detect "user typed a command while in a flow"
-const ALL_COMMANDS = [
-  "/start", "/help", "/video", "/cancel",
-  "/setvideocookies", "/clearvideocookies",
-];
-
-function isCommand(text) {
-  return ALL_COMMANDS.some((cmd) => text.startsWith(cmd));
-}
-
 function buildButtons(rows) {
   return rows.map((row) =>
     row.map((b) => Button.inline(b.label, Buffer.from(b.data))),
@@ -89,6 +79,13 @@ function cleanupDir(dir) {
   }
 }
 
+/** Returns true if the message contains a downloadable Telegram file. */
+function hasTelegramFile(msg) {
+  return !!(msg.document || msg.video || msg.audio || msg.voice ||
+    msg.videoNote || msg.sticker || msg.photo ||
+    (msg.media && (msg.media.document || msg.media.photo)));
+}
+
 function buildPostDownloadButtons() {
   const d = config.drive.enabled;
   const f = config.filehost.enabled;
@@ -109,12 +106,13 @@ function buildPostDownloadButtons() {
   return null;
 }
 
-function postDownloadPromptText(labelLine) {
+function postDownloadPromptText(labelLine, sentToTelegram = true) {
   const d = config.drive.enabled;
   const f = config.filehost.enabled;
-  if (d && f) return `${labelLine}\n✅ Sent to Telegram.\n\nWhat else would you like?`;
-  if (d) return `${labelLine}\n✅ Sent to Telegram.\n\n☁️ Upload to Google Drive (public link)?`;
-  if (f) return `${labelLine}\n✅ Sent to Telegram.\n\n🔗 Get a direct download link?`;
+  const base = sentToTelegram ? `${labelLine}\n✅ Sent to Telegram.\n\n` : `${labelLine}\n✅ Downloaded.\n\n`;
+  if (d && f) return `${base}What else would you like?`;
+  if (d) return `${base}☁️ Upload to Google Drive (public link)?`;
+  if (f) return `${base}🔗 Get a direct download link?`;
   return null;
 }
 
@@ -140,12 +138,13 @@ class Bot {
 
   async registerBotCommands() {
     const commands = [
-      { command: "start",              description: "Start the bot" },
-      { command: "help",               description: "Show usage instructions" },
-      { command: "video",              description: "Download a video or audio" },
-      { command: "setvideocookies",    description: "Set cookies for restricted video content" },
-      { command: "clearvideocookies",  description: "Clear saved video cookies" },
-      { command: "cancel",             description: "Cancel the current operation" },
+      { command: "start",             description: "Start the bot" },
+      { command: "help",              description: "Show usage instructions" },
+      { command: "video",             description: "Download a video or audio" },
+      { command: "setvideocookies",   description: "Set cookies for restricted video content" },
+      { command: "clearvideocookies", description: "Clear saved video cookies" },
+      { command: "filehost",          description: "Download a file from URL or Telegram post" },
+      { command: "cancel",            description: "Cancel the current operation" },
     ].map((c) => new Api.BotCommand({ command: c.command, description: c.description }));
     await this.client.invoke(
       new Api.bots.SetBotCommands({
@@ -180,12 +179,6 @@ class Bot {
     const text = (msg.message || "").trim();
     const userState = state.get(senderId);
 
-    // ── document upload (cookies file) ──────────────────────────────────────
-    if (msg.document) {
-      await this.handleDocument(msg, senderId);
-      return;
-    }
-
     // ── /start, /help ────────────────────────────────────────────────────────
     if (text.startsWith("/start") || text.startsWith("/help")) {
       state.reset(senderId);
@@ -193,19 +186,17 @@ class Bot {
       return;
     }
 
-    // ── /cancel — resets everything ──────────────────────────────────────────
+    // ── /cancel ──────────────────────────────────────────────────────────────
     if (text.startsWith("/cancel")) {
       state.reset(senderId);
-      await msg.reply({ message: "✅ Cancelled. Send /video to start a new download." });
+      await msg.reply({ message: "✅ Cancelled." });
       return;
     }
 
-    // ── /video — enter video download flow ───────────────────────────────────
+    // ── /video ───────────────────────────────────────────────────────────────
     if (text.startsWith("/video")) {
-      // If already in a flow, reset first (last command wins)
       state.reset(senderId);
-      const fresh = state.get(senderId);
-      fresh.waitingForVideoUrl = true;
+      state.get(senderId).waitingForVideoUrl = true;
       await msg.reply({
         message:
           "🎬 <b>Video Download</b>\n\n" +
@@ -218,10 +209,8 @@ class Bot {
 
     // ── /setvideocookies ─────────────────────────────────────────────────────
     if (text.startsWith("/setvideocookies")) {
-      // Resets any active flow, enters cookie waiting mode
       state.reset(senderId);
-      const fresh = state.get(senderId);
-      fresh.waitingForCookies = true;
+      state.get(senderId).waitingForCookies = true;
       await msg.reply({
         message:
           "🍪 <b>Set Video Cookies</b>\n\n" +
@@ -242,20 +231,58 @@ class Bot {
     // ── /clearvideocookies ───────────────────────────────────────────────────
     if (text.startsWith("/clearvideocookies")) {
       cookies.deleteCookies(senderId);
-      // Reset cookie waiting state but preserve any active flow
       userState.waitingForCookies = false;
       await msg.reply({ message: "🗑 Video cookies cleared." });
       return;
     }
 
-    // ── waiting for cookies (paste or file) ──────────────────────────────────
+    // ── /filehost ────────────────────────────────────────────────────────────
+    if (text.startsWith("/filehost")) {
+      state.reset(senderId);
+      state.get(senderId).waitingForFilehostInput = true;
+      await msg.reply({
+        message:
+          "📦 <b>File Host</b>\n\n" +
+          "Send me one of the following:\n\n" +
+          "• A <b>direct download URL</b>\n" +
+          "  (e.g. <code>https://example.com/file.zip</code>)\n\n" +
+          "• A <b>Telegram message</b> that contains a file\n" +
+          "  (forward or send the file directly)\n\n" +
+          `Max file size: ${humanSize(filehost.MAX_BYTES)}\n\n` +
+          "Send /cancel to abort.",
+        parseMode: "html",
+      });
+      return;
+    }
+
+    // ── waiting for cookies ──────────────────────────────────────────────────
     if (userState.waitingForCookies) {
+      // A file sent while waiting for cookies
+      if (hasTelegramFile(msg)) {
+        try {
+          const buf = await this.client.downloadMedia(msg, {});
+          const cookieText = buf ? buf.toString("utf8") : "";
+          if (cookies.isValidCookiesText(cookieText)) {
+            cookies.saveCookies(senderId, cookieText);
+            userState.waitingForCookies = false;
+            await msg.reply({ message: "✅ Cookies saved. Now send /video and paste the link to retry." });
+          } else {
+            await msg.reply({
+              message: "❌ The uploaded file does not look like a valid cookies.txt file.\nPlease use the <b>Get cookies.txt LOCALLY</b> extension to export it.",
+              parseMode: "html",
+            });
+          }
+        } catch (err) {
+          logger.error("Failed to read cookie file:", err.message);
+          await msg.reply({ message: "❌ Could not read the uploaded file." });
+        }
+        return;
+      }
+
       if (cookies.isValidCookiesText(text)) {
         cookies.saveCookies(senderId, text);
         userState.waitingForCookies = false;
-        await msg.reply({
-          message: "✅ Cookies saved. Now send /video and paste the link to retry.",
-        });
+        await msg.reply({ message: "✅ Cookies saved. Now send /video and paste the link to retry." });
       } else {
         await msg.reply({
           message:
@@ -271,62 +298,54 @@ class Bot {
     // ── waiting for video URL ────────────────────────────────────────────────
     if (userState.waitingForVideoUrl) {
       const urlMatch = text.match(URL_REGEX);
-
       if (urlMatch) {
         if (userState.activeJob) {
           await msg.reply({ message: "⏳ Another download is in progress. Please wait." });
           return;
         }
         userState.waitingForVideoUrl = false;
-        await this.handleUrl(msg, senderId, urlMatch[1]);
+        await this.handleVideoUrl(msg, senderId, urlMatch[1]);
+        return;
+      }
+      await msg.reply({ message: "⚠️ That doesn't look like a valid URL.\nSend the video link or /cancel to abort." });
+      return;
+    }
+
+    // ── waiting for filehost input (URL or Telegram file) ────────────────────
+    if (userState.waitingForFilehostInput) {
+      if (userState.filehostActiveJob) {
+        await msg.reply({ message: "⏳ A download is already in progress. Please wait." });
         return;
       }
 
-      // Not a URL and not a command → remind
+      // Telegram file/document forwarded or sent directly
+      if (hasTelegramFile(msg)) {
+        userState.waitingForFilehostInput = false;
+        await this.handleFilehostTelegram(msg, senderId);
+        return;
+      }
+
+      // Direct URL
+      const urlMatch = text.match(URL_REGEX);
+      if (urlMatch) {
+        userState.waitingForFilehostInput = false;
+        await this.handleFilehostUrl(msg, senderId, urlMatch[1]);
+        return;
+      }
+
       await msg.reply({
-        message: "⚠️ That doesn't look like a valid URL.\nSend the video link or /cancel to abort.",
+        message: "⚠️ Please send a direct download URL or a Telegram message containing a file.\nOr send /cancel to abort.",
       });
       return;
     }
 
-    // ── URL sent without /video first ────────────────────────────────────────
-    if (URL_REGEX.test(text)) {
+    // ── URL sent without any command first → help ────────────────────────────
+    if (URL_REGEX.test(text) || hasTelegramFile(msg)) {
       await this.sendHelp(msg);
       return;
     }
 
-    // ── anything else ────────────────────────────────────────────────────────
     await this.sendHelp(msg);
-  }
-
-  async handleDocument(msg, senderId) {
-    const userState = state.get(senderId);
-    // Only accept cookie files when explicitly waiting for them
-    if (!userState.waitingForCookies) {
-      await msg.reply({
-        message: "Use /setvideocookies first, then send the cookies.txt file.",
-      });
-      return;
-    }
-    try {
-      const buf = await this.client.downloadMedia(msg, {});
-      const text = buf ? buf.toString("utf8") : "";
-      if (cookies.isValidCookiesText(text)) {
-        cookies.saveCookies(senderId, text);
-        userState.waitingForCookies = false;
-        await msg.reply({ message: "✅ Cookies saved. Now send /video and paste the link to retry." });
-      } else {
-        await msg.reply({
-          message:
-            "❌ The uploaded file does not look like a valid cookies.txt file.\n" +
-            "Please use the <b>Get cookies.txt LOCALLY</b> extension to export it.",
-          parseMode: "html",
-        });
-      }
-    } catch (err) {
-      logger.error("Failed to read uploaded document:", err.message);
-      await msg.reply({ message: "❌ Could not read the uploaded file." });
-    }
   }
 
   async sendHelp(msg) {
@@ -340,15 +359,18 @@ class Bot {
       "🎬 <b>tg-hub</b>\n\n" +
       "<b>Commands:</b>\n" +
       "/video — download a video or audio\n" +
-      "/setvideocookies — set cookies for age-restricted or login-required content\n" +
-      "/clearvideocookies — delete saved cookies\n" +
+      "/filehost — download a file from a URL or Telegram post\n" +
+      "/setvideocookies — set cookies for age-restricted or login-required video\n" +
+      "/clearvideocookies — delete saved video cookies\n" +
       "/cancel — cancel the current operation\n" +
       "/help — show this message" +
       extrasNote;
     await msg.reply({ message: help, parseMode: "html" });
   }
 
-  async handleUrl(msg, senderId, url) {
+  // ── /video flow ─────────────────────────────────────────────────────────────
+
+  async handleVideoUrl(msg, senderId, url) {
     const userState = state.get(senderId);
     const cookiesPath = cookies.getCookiesPath(senderId);
     const status = await msg.reply({ message: "🔍 Fetching video info..." });
@@ -362,9 +384,7 @@ class Bot {
         userState.pendingUrl = url;
         await this.client.editMessage(msg.chatId, {
           message: status.id,
-          text:
-            "🔒 This URL requires cookies (login / age restriction / region lock).\n\n" +
-            "Use /setvideocookies to provide your cookies, then /video again.",
+          text: "🔒 This URL requires cookies (login / age restriction / region lock).\n\nUse /setvideocookies to provide your cookies, then /video again.",
           parseMode: "html",
         });
       } else {
@@ -394,6 +414,159 @@ class Bot {
       buttons: buildButtons(buildMainMenu(info)),
     });
   }
+
+  // ── /filehost flow — Telegram file ──────────────────────────────────────────
+
+  async handleFilehostTelegram(msg, senderId) {
+    const userState = state.get(senderId);
+    userState.filehostActiveJob = true;
+
+    const status = await msg.reply({ message: "⬇️ Downloading from Telegram... 0%" });
+    const jobDir = path.join(config.downloadDir, String(senderId), `fh_${Date.now()}`);
+
+    let lastEdit = 0;
+    const editStatus = async (text) => {
+      const now = Date.now();
+      if (now - lastEdit < 3000) return;
+      lastEdit = now;
+      try { await this.client.editMessage(msg.chatId, { message: status.id, text }); } catch (e) { /* ignore */ }
+    };
+
+    try {
+      const { tmpPath, fileName, size } = await filehost.downloadFromTelegram(
+        this.client,
+        msg,
+        jobDir,
+        (pct) => editStatus(`⬇️ Downloading from Telegram... ${pct.toFixed(1)}%`),
+      );
+
+      await editStatus(`✅ Downloaded ${humanSize(size)}.\n\nChoose what to do with it:`);
+
+      // For Telegram files: NO re-upload to Telegram, only post-action buttons
+      const buttons = buildPostDownloadButtons();
+      const promptText = postDownloadPromptText(`📦 <b>${escapeHtml(fileName)}</b>`, false);
+
+      if (buttons && promptText) {
+        userState.pendingPostAction = {
+          filePath: tmpPath,
+          jobDir,
+          fileName,
+          mimeType: guessMime(tmpPath),
+          labelLine: `📦 ${fileName}`,
+          chatId: msg.chatId,
+          messageId: status.id,
+        };
+        await this.client.editMessage(msg.chatId, {
+          message: status.id,
+          text: promptText,
+          parseMode: "html",
+          buttons,
+        });
+        return;
+      }
+
+      // No post-action configured — just confirm download
+      await this.client.editMessage(msg.chatId, { message: status.id, text: `📦 ${fileName}\n✅ Downloaded.` });
+    } catch (err) {
+      logger.error(`Filehost Telegram download failed for ${senderId}:`, err.message);
+      try {
+        await this.client.editMessage(msg.chatId, {
+          message: status.id,
+          text: `❌ Download failed:\n<pre>${escapeHtml(truncate(err.message, 400))}</pre>`,
+          parseMode: "html",
+        });
+      } catch (e) { /* ignore */ }
+      cleanupDir(jobDir);
+    } finally {
+      userState.filehostActiveJob = false;
+      const fresh = state.get(senderId);
+      if (!fresh.pendingPostAction) cleanupDir(jobDir);
+    }
+  }
+
+  // ── /filehost flow — direct URL ──────────────────────────────────────────────
+
+  async handleFilehostUrl(msg, senderId, url) {
+    const userState = state.get(senderId);
+    userState.filehostActiveJob = true;
+
+    const status = await msg.reply({ message: "⬇️ Downloading... 0%" });
+    const jobDir = path.join(config.downloadDir, String(senderId), `fh_${Date.now()}`);
+
+    let lastEdit = 0;
+    const editStatus = async (text) => {
+      const now = Date.now();
+      if (now - lastEdit < 3000) return;
+      lastEdit = now;
+      try { await this.client.editMessage(msg.chatId, { message: status.id, text }); } catch (e) { /* ignore */ }
+    };
+
+    try {
+      const { tmpPath, fileName, size } = await filehost.downloadFromUrl(
+        url,
+        jobDir,
+        (pct) => editStatus(`⬇️ Downloading... ${pct.toFixed(1)}%`),
+      );
+
+      // Upload to Telegram
+      await this.client.editMessage(msg.chatId, { message: status.id, text: `📤 Uploading to Telegram ${humanSize(size)}...` });
+
+      let lastUploadEdit = 0;
+      await this.client.sendFile(msg.chatId, {
+        file: tmpPath,
+        caption: fileName,
+        progressCallback: (uploaded, total) => {
+          const now = Date.now();
+          if (now - lastUploadEdit < 4000) return;
+          lastUploadEdit = now;
+          if (!total) return;
+          const pct = ((Number(uploaded) / Number(total)) * 100).toFixed(1);
+          this.client.editMessage(msg.chatId, { message: status.id, text: `📤 Uploading to Telegram... ${pct}%` }).catch(() => {});
+        },
+      });
+
+      const labelLine = `📦 ${fileName}`;
+      const buttons = buildPostDownloadButtons();
+      const promptText = postDownloadPromptText(labelLine, true);
+
+      if (buttons && promptText) {
+        userState.pendingPostAction = {
+          filePath: tmpPath,
+          jobDir,
+          fileName,
+          mimeType: guessMime(tmpPath),
+          labelLine,
+          chatId: msg.chatId,
+          messageId: status.id,
+        };
+        await this.client.editMessage(msg.chatId, {
+          message: status.id,
+          text: promptText,
+          parseMode: "html",
+          buttons,
+        });
+        return;
+      }
+
+      await this.client.editMessage(msg.chatId, { message: status.id, text: `${labelLine}\n✅ Done.` });
+    } catch (err) {
+      logger.error(`Filehost URL download failed for ${senderId}:`, err.message);
+      try {
+        await this.client.editMessage(msg.chatId, {
+          message: status.id,
+          text: `❌ Failed:\n<pre>${escapeHtml(truncate(err.message, 400))}</pre>`,
+          parseMode: "html",
+        });
+      } catch (e) { /* ignore */ }
+      cleanupDir(jobDir);
+    } finally {
+      userState.filehostActiveJob = false;
+      const fresh = state.get(senderId);
+      if (!fresh.pendingPostAction) cleanupDir(jobDir);
+    }
+  }
+
+  // ── callback handler ─────────────────────────────────────────────────────────
 
   async onCallback(event) {
     const rawId = event.senderId || (event.query && event.query.userId) || event.userId;
@@ -472,7 +645,7 @@ class Bot {
 
     try {
       await event.answer({ message: "Starting..." });
-      await this.runJob(event, senderId, url, kind, parts.slice(1), probeInfo);
+      await this.runVideoJob(event, senderId, url, kind, parts.slice(1), probeInfo);
     } catch (err) {
       logger.error(`Job failed for ${senderId}:`, err.message);
       await this.notifyJobError(event, senderId, err);
@@ -481,7 +654,9 @@ class Bot {
     }
   }
 
-  async runJob(event, senderId, url, kind, parts, probeInfo) {
+  // ── video download job ───────────────────────────────────────────────────────
+
+  async runVideoJob(event, senderId, url, kind, parts, probeInfo) {
     const chatId = event.chatId;
     const messageId = Number(event.messageId);
     const cookiesPath = cookies.getCookiesPath(senderId);
@@ -580,23 +755,23 @@ class Bot {
       });
 
       const buttons = buildPostDownloadButtons();
-      const promptText = postDownloadPromptText(labelLine);
+      const promptText = postDownloadPromptText(labelLine, true);
 
       if (buttons && promptText) {
         const userState = state.get(senderId);
         userState.pendingPostAction = { filePath: outputFile, jobDir, fileName, mimeType: guessMime(outputFile), labelLine, chatId, messageId };
-        await this.client.editMessage(chatId, { message: messageId, text: promptText, buttons });
+        await this.client.editMessage(chatId, { message: messageId, text: promptText, parseMode: "html", buttons });
         return;
       }
 
       await this.client.editMessage(chatId, { message: messageId, text: `${labelLine}\n✅ Done.` });
     } finally {
       const userState = state.get(senderId);
-      if (!userState.pendingPostAction) {
-        cleanupDir(jobDir);
-      }
+      if (!userState.pendingPostAction) cleanupDir(jobDir);
     }
   }
+
+  // ── shared post-download action handler ──────────────────────────────────────
 
   async handlePostAction(action, pending) {
     const { filePath, jobDir, fileName, mimeType, labelLine, chatId, messageId } = pending;
