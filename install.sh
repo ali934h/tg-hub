@@ -38,7 +38,7 @@ banner() {
   echo -e "${BOLD}${CYAN}            tg-hub installer            ${NC}"
   echo -e "${BOLD}${CYAN}========================================${NC}"
   echo -e "${BOLD} Telegram video downloader${NC}"
-  echo -e "${BOLD} Optional: Google Drive upload + Direct Link via custom domain${NC}"
+  echo -e "${BOLD} + Google Drive upload + Direct Link via custom domain${NC}"
   echo -e "${BOLD} Repo:${NC}        ${REPO_URL}"
   echo
 }
@@ -189,25 +189,12 @@ prompt_port() {
   done
 }
 
-prompt_yn() {
-  local prompt="$1"
-  while true; do
-    read -r -p "$(echo -e "${prompt} [y/N]: ")" yn
-    case "${yn,,}" in
-      y|yes) return 0 ;;
-      n|no|"") return 1 ;;
-      *) warn "Please answer y or n." ;;
-    esac
-  done
-}
-
 # ── input collection variables ─────────────────────────────────────────────────
 
 BOT_TOKEN="" API_ID="" API_HASH="" ALLOWED_USERS=""
-GOOGLE_CLIENT_ID="" GOOGLE_CLIENT_SECRET="" DRIVE_FOLDER_ID="" SETUP_DRIVE=false
+GOOGLE_CLIENT_ID="" GOOGLE_CLIENT_SECRET="" DRIVE_FOLDER_ID=""
 FILEHOST_DOMAIN="" FILEHOST_SERVE_DIR="" FILEHOST_PORT="3000"
 FILEHOST_RETENTION_DAYS="0" SSL_CERT="" SSL_KEY="" SSL_DIR=""
-SETUP_FILEHOST=false
 
 collect_inputs() {
   step "Collecting configuration"
@@ -224,53 +211,40 @@ collect_inputs() {
   echo -e "${CYAN}Tip: send /start to @userinfobot to find your numeric user id.${NC}"
   ALLOWED_USERS=$(prompt_user_ids "ALLOWED_USERS")
 
-  # ── Google Drive ──────────────────────────────────────────────────────────
-  echo
-  echo -e "${BOLD}Google Drive upload (optional)${NC}"
-  echo -e "${CYAN}After each download the bot will ask if you want to upload to Drive.${NC}"
-  if prompt_yn "Set up Google Drive integration now?"; then
-    SETUP_DRIVE=true
-    echo
-    echo -e "${CYAN}You need a Google Cloud project with Drive API enabled and an OAuth 2.0 Desktop client.${NC}"
-    echo -e "${CYAN}See README.md § Google Drive Setup for step-by-step instructions.${NC}\n"
-    GOOGLE_CLIENT_ID=$(prompt_nonempty "GOOGLE_CLIENT_ID")
-    GOOGLE_CLIENT_SECRET=$(prompt_nonempty "GOOGLE_CLIENT_SECRET")
-    echo -e "\n${BOLD}Drive folder ID${NC} (optional — leave empty to upload to Drive root)"
-    DRIVE_FOLDER_ID=$(prompt_optional "DRIVE_FOLDER_ID")
-  else
-    info "Skipping Drive. Run 'node ${INSTALL_DIR}/setup-drive.js' later to add it."
-  fi
+  # ── Google Drive (mandatory) ──────────────────────────────────────────────
+  step "Google Drive setup"
+  echo -e "${CYAN}After each download the bot will offer to upload to Drive.${NC}"
+  echo -e "${CYAN}You need a Google Cloud project with Drive API enabled and an OAuth 2.0 Desktop client.${NC}"
+  echo -e "${CYAN}See README.md § Google Drive Setup for step-by-step instructions.${NC}\n"
+  GOOGLE_CLIENT_ID=$(prompt_nonempty "GOOGLE_CLIENT_ID")
+  GOOGLE_CLIENT_SECRET=$(prompt_nonempty "GOOGLE_CLIENT_SECRET")
+  echo -e "\n${BOLD}Drive folder ID${NC} (optional — leave empty to upload to Drive root)"
+  DRIVE_FOLDER_ID=$(prompt_optional "DRIVE_FOLDER_ID")
 
-  # ── Filehost / Direct Link ────────────────────────────────────────────────
-  echo
-  echo -e "${BOLD}Direct Link via custom domain (optional)${NC}"
-  echo -e "${CYAN}After each download the bot can also offer a permanent direct download URL.${NC}"
+  # ── Filehost / Direct Link (mandatory) ───────────────────────────────────
+  step "Direct Link setup"
+  echo -e "${CYAN}After each download the bot will also offer a permanent direct download URL.${NC}"
   echo -e "${CYAN}Requirements:${NC}"
   echo -e "${CYAN}  - Domain on Cloudflare with orange cloud (CDN) enabled${NC}"
-  echo -e "${CYAN}  - Cloudflare Origin Server certificate (.pem + .key) already saved on this server${NC}"
-  if prompt_yn "Set up direct-link (filehost) feature now?"; then
-    SETUP_FILEHOST=true
+  echo -e "${CYAN}  - Cloudflare Origin Server certificate (.pem + .key) already saved on this server${NC}\n"
 
-    echo -e "\n${BOLD}Domain${NC} (e.g. files.example.com — must point to this server in Cloudflare)"
-    FILEHOST_DOMAIN=$(prompt_nonempty "FILEHOST_DOMAIN")
+  echo -e "${BOLD}Domain${NC} (e.g. files.example.com — must point to this server in Cloudflare)"
+  FILEHOST_DOMAIN=$(prompt_nonempty "FILEHOST_DOMAIN")
 
-    echo -e "\n${BOLD}Cloudflare Origin Certificate${NC}"
-    echo -e "${CYAN}In Cloudflare: SSL/TLS → Origin Server → Create Certificate → save the files.${NC}"
-    SSL_CERT=$(prompt_file "Path to origin .pem (certificate) file")
-    SSL_KEY=$(prompt_file  "Path to origin .key (private key) file")
-    SSL_DIR=$(dirname "${SSL_CERT}")
+  echo -e "\n${BOLD}Cloudflare Origin Certificate${NC}"
+  echo -e "${CYAN}In Cloudflare: SSL/TLS → Origin Server → Create Certificate → save the files.${NC}"
+  SSL_CERT=$(prompt_file "Path to origin .pem (certificate) file")
+  SSL_KEY=$(prompt_file  "Path to origin .key (private key) file")
+  SSL_DIR=$(dirname "${SSL_CERT}")
 
-    echo -e "\n${BOLD}Files serve directory${NC} (nginx will serve files from here)"
-    FILEHOST_SERVE_DIR=$(prompt_nonempty "FILEHOST_SERVE_DIR" "${DEFAULT_SERVE_DIR}")
+  echo -e "\n${BOLD}Files serve directory${NC} (nginx will serve files from here)"
+  FILEHOST_SERVE_DIR=$(prompt_nonempty "FILEHOST_SERVE_DIR" "${DEFAULT_SERVE_DIR}")
 
-    echo -e "\n${BOLD}Internal Node.js port${NC} (nginx proxies /health to it)"
-    FILEHOST_PORT=$(prompt_port "3000")
+  echo -e "\n${BOLD}Internal Node.js port${NC} (nginx proxies /health to it)"
+  FILEHOST_PORT=$(prompt_port "3000")
 
-    echo -e "\n${BOLD}Retention${NC} — how many days to keep hosted files (0 = keep forever)"
-    FILEHOST_RETENTION_DAYS=$(prompt_numeric "FILEHOST_RETENTION_DAYS" "0")
-  else
-    info "Skipping filehost. Add FILEHOST_DOMAIN and run install again to enable it later."
-  fi
+  echo -e "\n${BOLD}Retention${NC} — how many days to keep hosted files (0 = keep forever)"
+  FILEHOST_RETENTION_DAYS=$(prompt_numeric "FILEHOST_RETENTION_DAYS" "0")
 }
 
 confirm_summary() {
@@ -279,16 +253,12 @@ confirm_summary() {
   echo -e "  API_ID:            ${API_ID}"
   echo -e "  API_HASH:          ${API_HASH}"
   echo -e "  ALLOWED_USERS:     ${ALLOWED_USERS}"
-  echo -e "  Google Drive:      $( [[ "${SETUP_DRIVE}" == true ]] && echo "enabled" || echo "disabled" )"
-  if [[ "${SETUP_FILEHOST}" == true ]]; then
-    echo -e "  Direct Link:       enabled"
-    echo -e "  Domain:            ${FILEHOST_DOMAIN}"
-    echo -e "  Serve dir:         ${FILEHOST_SERVE_DIR}"
-    echo -e "  Internal port:     ${FILEHOST_PORT}"
-    echo -e "  Retention:         ${FILEHOST_RETENTION_DAYS} day(s)$( [[ "${FILEHOST_RETENTION_DAYS}" == "0" ]] && echo " (keep forever)" || echo "" )"
-  else
-    echo -e "  Direct Link:       disabled"
-  fi
+  echo -e "  Google Drive:      enabled"
+  echo -e "  Direct Link:       enabled"
+  echo -e "  Domain:            ${FILEHOST_DOMAIN}"
+  echo -e "  Serve dir:         ${FILEHOST_SERVE_DIR}"
+  echo -e "  Internal port:     ${FILEHOST_PORT}"
+  echo -e "  Retention:         ${FILEHOST_RETENTION_DAYS} day(s)$( [[ "${FILEHOST_RETENTION_DAYS}" == "0" ]] && echo " (keep forever)" || echo "" )"
   echo
   while true; do
     read -r -p "$(echo -e "${BOLD}Proceed? [y/N]: ${NC}")" yn
@@ -310,15 +280,15 @@ DOWNLOAD_DIR=${DOWNLOAD_DIR}
 MAX_UPLOAD_MB=2000
 LOG_LEVEL=info
 
-# Google Drive (optional)
+# Google Drive
 GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
 GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
 GOOGLE_REFRESH_TOKEN=
 DRIVE_FOLDER_ID=${DRIVE_FOLDER_ID}
 
-# Direct Link / Filehost (optional)
+# Direct Link / Filehost
 FILEHOST_DOMAIN=${FILEHOST_DOMAIN}
-FILEHOST_SERVE_DIR=${FILEHOST_SERVE_DIR:-${DEFAULT_SERVE_DIR}}
+FILEHOST_SERVE_DIR=${FILEHOST_SERVE_DIR}
 FILEHOST_PORT=${FILEHOST_PORT}
 FILEHOST_RETENTION_DAYS=${FILEHOST_RETENTION_DAYS}
 EOF
@@ -332,16 +302,14 @@ prepare_dirs() {
   chmod 700 "${DOWNLOAD_DIR}/cookies"
   ok "Download dir: ${DOWNLOAD_DIR}"
 
-  if [[ "${SETUP_FILEHOST}" == true ]]; then
-    mkdir -p "${FILEHOST_SERVE_DIR}"
-    chmod 755 "${FILEHOST_SERVE_DIR}"
-    case "${FILEHOST_SERVE_DIR}" in
-      /root*)
-        warn "FILEHOST_SERVE_DIR is under /root. Adding traversal permission (chmod o+x /root)."
-        chmod o+x /root ;;
-    esac
-    ok "Serve dir: ${FILEHOST_SERVE_DIR}"
-  fi
+  mkdir -p "${FILEHOST_SERVE_DIR}"
+  chmod 755 "${FILEHOST_SERVE_DIR}"
+  case "${FILEHOST_SERVE_DIR}" in
+    /root*)
+      warn "FILEHOST_SERVE_DIR is under /root. Adding traversal permission (chmod o+x /root)."
+      chmod o+x /root ;;
+  esac
+  ok "Serve dir: ${FILEHOST_SERVE_DIR}"
 }
 
 install_npm_deps() {
@@ -352,7 +320,6 @@ install_npm_deps() {
 }
 
 run_drive_setup() {
-  [[ "${SETUP_DRIVE}" != true ]] && return
   step "Setting up Google Drive OAuth token"
   echo -e "${CYAN}Follow the prompts. Use SSH tunnel or paste the redirect URL if no browser on server.${NC}\n"
   cd "${INSTALL_DIR}"
@@ -392,8 +359,6 @@ write_nginx_conf() {
 }
 
 setup_nginx() {
-  [[ "${SETUP_FILEHOST}" != true ]] && return
-
   if ! command -v nginx >/dev/null 2>&1; then
     info "Installing nginx"
     apt-get install -y nginx
@@ -420,16 +385,12 @@ success_message() {
   echo -e "${BOLD}${GREEN}     tg-hub is ready!                   ${NC}"
   echo -e "${BOLD}${GREEN}========================================${NC}\n"
   echo -e "${BOLD}Send /start to your bot in Telegram to begin.${NC}\n"
-  if [[ "${SETUP_DRIVE}" == true ]]; then
-    echo -e "  ☁️  Google Drive upload: ${GREEN}enabled${NC}"
-  fi
-  if [[ "${SETUP_FILEHOST}" == true ]]; then
-    echo -e "  🔗 Direct Link: ${GREEN}enabled${NC} — https://${FILEHOST_DOMAIN}/files/"
-    if [[ "${FILEHOST_RETENTION_DAYS}" != "0" ]]; then
-      echo -e "     Files are kept for ${FILEHOST_RETENTION_DAYS} day(s) then auto-deleted."
-    else
-      echo -e "     Files are kept forever (FILEHOST_RETENTION_DAYS=0)."
-    fi
+  echo -e "  ☁️  Google Drive upload: ${GREEN}enabled${NC}"
+  echo -e "  🔗 Direct Link: ${GREEN}enabled${NC} — https://${FILEHOST_DOMAIN}/files/"
+  if [[ "${FILEHOST_RETENTION_DAYS}" != "0" ]]; then
+    echo -e "     Files are kept for ${FILEHOST_RETENTION_DAYS} day(s) then auto-deleted."
+  else
+    echo -e "     Files are kept forever (FILEHOST_RETENTION_DAYS=0)."
   fi
   cat <<EOF
 
