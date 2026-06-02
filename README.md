@@ -29,75 +29,40 @@ Built on top of [tg-video](https://github.com/ali934h/tg-video), extended with t
 
 ## Install
 
-### 1 — Clone the repo and install dependencies
+One-line install (run as root):
 
 ```bash
-git clone https://github.com/ali934h/tg-hub.git /root/tg-hub
-cd /root/tg-hub
-npm install
+bash <(curl -fsSL https://raw.githubusercontent.com/ali934h/tg-hub/main/install.sh)
 ```
 
-Make sure these system packages are installed:
+The installer will:
 
-```bash
-# Node.js 20+
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt-get install -y nodejs
+- Install Node.js 20, ffmpeg, yt-dlp, deno, and PM2
+- Clone this repo to `/root/tg-hub`
+- Prompt for `BOT_TOKEN`, `API_ID`, `API_HASH`, and `ALLOWED_USERS`
+- Ask if you want to set up Google Drive — if yes, walks you through it interactively
+- Start the bot with PM2 and enable auto-start on boot
 
-# ffmpeg and yt-dlp
-apt-get install -y ffmpeg python3-pip
-pip3 install -U yt-dlp
+The bot uses **MTProto polling** — no inbound port, no domain, no SSL needed.
 
-# PM2 (process manager)
-npm install -g pm2
-```
+---
 
-### 2 — Configure `.env`
+## (Optional) Set up Google Drive after install
 
-```bash
-cp /root/tg-hub/.env.example /root/tg-hub/.env
-chmod 600 /root/tg-hub/.env
-nano /root/tg-hub/.env
-```
+If you skipped Drive during install, you can add it any time:
 
-Fill in the required values:
-
-| Variable | Description |
-|---|---|
-| `BOT_TOKEN` | Bot token from @BotFather |
-| `API_ID` | Telegram API ID from my.telegram.org |
-| `API_HASH` | Telegram API Hash from my.telegram.org |
-| `ALLOWED_USERS` | Comma-separated Telegram user IDs allowed to use the bot |
-| `DOWNLOAD_DIR` | Temp folder for downloads (default: `/root/tg-hub-downloads`) |
-| `MAX_UPLOAD_MB` | Max file size to upload to Telegram (default: `2000`) |
-| `LOG_LEVEL` | `error` \| `warn` \| `info` \| `debug` (default: `info`) |
-
-Leave the `GOOGLE_*` variables empty for now — you can set them up later.
-
-### 3 — Start the bot
-
-```bash
-cd /root/tg-hub
-pm2 start ecosystem.config.js
-pm2 save
-pm2 startup   # follow the printed command to enable auto-start on boot
-```
-
-### 4 — (Optional) Set up Google Drive upload
-
-#### 4.1 — Create a Google Cloud project and OAuth client
+#### 1 — Create a Google Cloud project and OAuth client
 
 1. Go to [console.cloud.google.com](https://console.cloud.google.com) and create a new project.
 2. Enable the **Google Drive API**: *APIs & Services → Library → Google Drive API → Enable*.
 3. Go to *APIs & Services → OAuth consent screen*:
-   - User type: **External**
-   - Fill in app name and your email, then save.
+   - User type: **External** → fill in app name and email → save.
    - Under *Publishing status*, click **Publish app** (no Google review needed for `drive.file` scope).
 4. Go to *APIs & Services → Credentials → Create Credentials → OAuth client ID*:
    - Application type: **Desktop app**
-   - Download or copy the **Client ID** and **Client Secret**.
+   - Copy the **Client ID** and **Client Secret**.
 
-#### 4.2 — Add credentials to `.env`
+#### 2 — Add credentials to `.env`
 
 ```bash
 nano /root/tg-hub/.env
@@ -108,24 +73,18 @@ Fill in:
 ```
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
-# Leave GOOGLE_REFRESH_TOKEN empty — setup-drive.js will fill it in
-DRIVE_FOLDER_ID=   # optional: paste a folder ID to upload into a specific folder
+DRIVE_FOLDER_ID=   # optional: folder ID to upload into (leave blank for Drive root)
 ```
 
-#### 4.3 — Run the OAuth setup script
+#### 3 — Run the OAuth setup script
 
 ```bash
-cd /root/tg-hub
-node setup-drive.js
+node /root/tg-hub/setup-drive.js
 ```
 
-The script will print an authorization URL. Open it in a browser, approve the request, and either:
-- Let the redirect be caught automatically (if running locally or via SSH tunnel), or
-- Copy the full redirect URL from your browser's address bar and paste it into the terminal.
+Open the printed URL in a browser, approve, then either let the redirect be caught automatically (SSH tunnel) or paste the redirect URL into the terminal. The script saves the refresh token directly into `.env`.
 
-The script saves the refresh token directly into `.env`.
-
-#### 4.4 — Restart the bot
+#### 4 — Restart
 
 ```bash
 pm2 restart tg-hub
@@ -137,26 +96,11 @@ pm2 logs tg-hub   # should print "Google Drive upload: enabled"
 ## Daily commands
 
 ```bash
-pm2 logs tg-hub          # follow live logs
-pm2 restart tg-hub       # restart
-pm2 stop tg-hub          # stop
-pm2 status               # view process status
-```
-
-To update yt-dlp:
-
-```bash
-yt-dlp -U
-pm2 restart tg-hub
-```
-
-To update the bot:
-
-```bash
-cd /root/tg-hub
-git pull
-npm install
-pm2 restart tg-hub
+pm2 logs tg-hub                      # follow live logs
+pm2 restart tg-hub                   # restart
+pm2 stop tg-hub                      # stop
+bash /root/tg-hub/update.sh          # pull latest code and restart
+bash /root/tg-hub/uninstall.sh       # remove everything
 ```
 
 ---
@@ -173,13 +117,13 @@ pm2 restart tg-hub
 4. The bot downloads and uploads the file to Telegram.
 5. If Google Drive is configured, the bot asks: **☁️ Upload to Google Drive?**
    - Tap **Yes** → the file is uploaded and you receive a Drive link.
-   - Tap **No** → done, the Telegram file is kept.
+   - Tap **No** → done, the Telegram copy is kept.
 
 ### Cookies (for restricted content)
 
-If a source requires login, age verification, or is region-locked, the bot will prompt you to provide cookies. Two methods:
+If a source requires login, age verification, or is region-locked, the bot will prompt you. Two methods:
 
-- **Paste as text** — install the **Get cookies.txt LOCALLY** browser extension, export cookies for the site, and paste the full file contents as a chat message.
+- **Paste as text** — install the **Get cookies.txt LOCALLY** browser extension, export cookies for the site, and paste the full file contents into the chat.
 - **Send as a file** — same export, but send the `cookies.txt` file directly to the bot as an attachment.
 
 Then resend the original URL.
@@ -197,7 +141,7 @@ Then resend the original URL.
 ## Troubleshooting
 
 **Bot does not respond.**
-Check `pm2 logs tg-hub`. Make sure your numeric user ID is listed in `ALLOWED_USERS` in `/root/tg-hub/.env`.
+Check `pm2 logs tg-hub`. Make sure your numeric user ID is in `ALLOWED_USERS` in `/root/tg-hub/.env`.
 
 **`File too large`.**
 MTProto upload limit is ~2 GB. Choose a lower quality, or reduce `MAX_UPLOAD_MB` in `.env` and restart.
@@ -206,13 +150,16 @@ MTProto upload limit is ~2 GB. Choose a lower quality, or reduce `MAX_UPLOAD_MB`
 Provide cookies via the *Get cookies.txt LOCALLY* extension and retry.
 
 **`invalid_grant` error on Drive upload.**
-Your refresh token expired (common if the OAuth app was left in *Testing* status). Publish the app at [console.cloud.google.com/auth/audience](https://console.cloud.google.com/auth/audience), then re-run `node setup-drive.js` and restart the bot.
+Your refresh token expired — common when the OAuth app is in *Testing* status. Publish the app at [console.cloud.google.com/auth/audience](https://console.cloud.google.com/auth/audience), then re-run `node /root/tg-hub/setup-drive.js` and restart.
 
 **Drive upload prompt not appearing.**
 Make sure all three `GOOGLE_*` variables are set in `.env` and the bot was restarted. Check `pm2 logs tg-hub` for `"Google Drive upload: enabled"`.
 
 **yt-dlp errors after a site update.**
-Run `yt-dlp -U` to update yt-dlp, then `pm2 restart tg-hub`.
+Run `yt-dlp -U`, then `pm2 restart tg-hub`.
 
 **Need to reconfigure.**
-Edit `/root/tg-hub/.env` (it is chmod 600) and run `pm2 restart tg-hub`.
+Edit `/root/tg-hub/.env` (chmod 600) and run `pm2 restart tg-hub`.
+
+**Start over.**
+`bash /root/tg-hub/uninstall.sh`, then run the one-line installer again.
